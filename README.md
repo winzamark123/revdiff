@@ -20,7 +20,7 @@ Built for a specific use case: reviewing code changes, plans, and documents with
 - Blame gutter: shows author name and commit age per line, toggle with `B`
 - Annotate any line in the diff (added, removed, or context) plus file-level notes
 - Single-file auto-detection: when a diff contains exactly one file, hides the tree pane and gives full terminal width to the diff view
-- Two-pane TUI: file tree (left) + colorized diff viewport (right)
+- Two-pane TUI: hierarchical, collapsible file tree (left) + colorized diff viewport (right)
 - Vim-style `/` search within diff with `n`/`N` match navigation
 - Hunk navigation to jump between change groups
 - Annotation list popup (`@`): browse all annotations across files, jump to any annotation
@@ -712,7 +712,7 @@ In the Claude Code and Codex plugins, you can also tell the agent to use a past 
 
 | Key | Action |
 |-----|--------|
-| `j/k` or up/down | Navigate files (tree) / scroll diff (diff pane) |
+| `j/k` or up/down | Navigate files and directories (tree) / scroll diff (diff pane) |
 | `h/l` | Switch between file tree and diff pane |
 | left/right | Horizontal scroll in diff pane (truncated lines show `«` / `»` overflow indicators at the edges) |
 | `Tab` | Switch between file tree and diff pane |
@@ -720,7 +720,7 @@ In the Claude Code and Codex plugins, you can also tell the agent to use a past 
 | `Ctrl+d/Ctrl+u` | Half-page scroll in file tree and diff pane |
 | `J/K` | Scroll diff viewport (works from either pane) |
 | `Home/End` | Jump to first/last item |
-| `Enter` | Switch to diff pane (tree) / start annotation (diff pane) |
+| `Enter` | Expand/collapse selected directory or switch selected file to diff pane (tree) / start annotation (diff pane) |
 | `n/p` | Next/previous changed file; next/prev header in markdown TOC mode (n = next match when search active) |
 | `[` / `]` | Jump to previous/next change hunk in diff; add `--cross-file-hunks` to continue into the previous/next file at the boundary |
 | `e` | Open focused file in `$EDITOR` |
@@ -755,7 +755,9 @@ Press `e` in the diff pane to open the focused file in `$EDITOR` (`open_file_in_
 
 Press `O` to write the current annotations to the `--output` file without exiting (`flush_output` — rebindable). This keeps revdiff open while handing the file to an AI agent: annotate, flush with `O`, let the agent read the file and edit code, then reload with `R` and continue in the same session. Each flush overwrites the file with the full current annotation set (a snapshot, not an append log), using the same atomic write as a normal quit. `O` requires `-o`/`--output`; with no output file, or with no annotations yet, it shows a status hint and writes nothing.
 
-Press `Space` to mark the focused file reviewed. Press `F` to toggle the sidebar between all files and unreviewed files; while filtered, marking a file reviewed removes it from the list and advances to the next unfinished file. On `R` reload, revdiff keeps the mark only when the file's effective text diff is unchanged; rebases that only shift line numbers or surrounding context keep it, while changed or removed files lose it. Binary files and opaque placeholders are conservatively unmarked on reload because their rendered diff does not expose enough content to prove they are unchanged.
+The file tree renders each directory level separately and starts fully expanded. Select a directory and press `Enter` or `Space` to collapse or expand it; `n`/`p` continue to jump directly between files.
+
+Press `Space` on a file to mark it reviewed. Press `F` to toggle the sidebar between all files and unreviewed files; while filtered, marking a file reviewed removes it from the list and advances to the next unfinished file. On `R` reload, revdiff keeps the mark only when the file's effective text diff is unchanged; rebases that only shift line numbers or surrounding context keep it, while changed or removed files lose it. Binary files and opaque placeholders are conservatively unmarked on reload because their rendered diff does not expose enough content to prove they are unchanged.
 
 **View:**
 
@@ -871,7 +873,7 @@ When the leader is pressed, the status bar shows `Pending: ctrl+w, esc to cancel
 
 **Search:** `search`
 
-**Annotations:** `confirm` (annotate line / select file), `annotate_file`, `delete_annotation`, `annot_list`, `open_editor`, `next_annotation`, `prev_annotation`, `flush_output`
+**Annotations:** `confirm` (annotate line / select file or toggle directory), `annotate_file`, `delete_annotation`, `annot_list`, `open_editor`, `next_annotation`, `prev_annotation`, `flush_output`
 
 **View:** `toggle_collapsed`, `toggle_compact`, `toggle_wrap`, `toggle_tree`, `toggle_line_numbers`, `toggle_blame`, `toggle_word_diff`, `toggle_hunk`, `toggle_untracked`, `mark_reviewed`, `filter_unreviewed`, `theme_select`, `filter`, `info`, `reload`
 

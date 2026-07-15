@@ -216,7 +216,7 @@ func defaultDescriptions() []HelpEntry {
 		{ActionSearch, "search in diff", "Search"},
 
 		// annotations
-		{ActionConfirm, "annotate line / select file", "Annotations"},
+		{ActionConfirm, "annotate line / select or toggle tree entry", "Annotations"},
 		{ActionAnnotateFile, "annotate file", "Annotations"},
 		{ActionDeleteAnnotation, "delete annotation", "Annotations"},
 		{ActionAnnotList, "annotation list", "Annotations"},
@@ -235,7 +235,7 @@ func defaultDescriptions() []HelpEntry {
 		{ActionToggleWordDiff, "toggle word-diff highlighting", "View"},
 		{ActionToggleHunk, "toggle hunk in collapsed", "View"},
 		{ActionToggleUntracked, "show/hide untracked files", "View"},
-		{ActionMarkReviewed, "mark file as reviewed", "View"},
+		{ActionMarkReviewed, "mark file reviewed / toggle directory", "View"},
 		{ActionFilterUnreviewed, "show unreviewed files", "View"},
 		{ActionFilter, "filter files", "View"},
 		{ActionThemeSelect, "theme selector", "View"},

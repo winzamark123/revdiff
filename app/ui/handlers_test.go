@@ -15,6 +15,34 @@ import (
 	"github.com/umputun/revdiff/app/ui/sidepane"
 )
 
+func TestModel_ToggleTreeDirectoryWithEnterOrSpace(t *testing.T) {
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyRunes, Runes: []rune{' '}},
+	} {
+		t.Run(key.String(), func(t *testing.T) {
+			m := testModel([]string{"app/a.go", "docs/readme.md"}, nil)
+			m.tree = testNewFileTree([]string{"app/a.go", "docs/readme.md"})
+			m.file.name = "app/a.go"
+			m.layout.focus = paneTree
+			m.tree.Move(sidepane.MotionUp) // app/a.go -> app directory
+			require.Empty(t, m.tree.SelectedFile())
+			require.Equal(t, 4, m.tree.ScrollState().Total)
+
+			result, cmd := m.Update(key)
+			model := result.(Model)
+
+			assert.Nil(t, cmd)
+			assert.Equal(t, paneTree, model.layout.focus)
+			assert.Equal(t, 3, model.tree.ScrollState().Total)
+			assert.Zero(t, model.tree.ReviewedCount(), "space on a directory must not review a file")
+
+			result, _ = model.Update(key)
+			assert.Equal(t, 4, result.(Model).tree.ScrollState().Total)
+		})
+	}
+}
+
 func TestModel_MarkReviewedFromTreePane(t *testing.T) {
 	lines := []diff.DiffLine{{NewNum: 1, Content: "line1", ChangeType: diff.ChangeContext}}
 	m := testModel([]string{"a.go", "b.go"}, map[string][]diff.DiffLine{

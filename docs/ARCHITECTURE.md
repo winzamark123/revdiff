@@ -144,7 +144,7 @@ Three main types:
 ### app/ui/sidepane/ — left-pane navigation
 
 Two independent component types, both with cursor/offset management, rendering, and keyboard navigation:
-- **`FileTree`** — file tree sidebar. Supports navigation (`Move`/`StepFile`), filtering (annotated-only), semantic-fingerprint reviewed tracking, directory grouping. File-list reloads revalidate only paths reviewed before the load; marks added during the load are reconciled when that file's refreshed diff arrives.
+- **`FileTree`** — hierarchical file tree sidebar. Supports entry navigation (`Move`), file-only navigation (`StepFile`), expanded/collapsed directory state, filtering (annotated-only), and semantic-fingerprint reviewed tracking. File-list reloads revalidate only paths reviewed before the load; marks added during the load are reconciled when that file's refreshed diff arrives.
 - **`TOC`** — markdown table-of-contents. Activated for single-file full-context markdown. Active section tracking, header-level navigation
 
 Both constructed via factory closures in `main.go`, consumed through `FileTreeComponent`/`TOCComponent` interfaces.
@@ -234,7 +234,7 @@ All consumer-side — defined in `app/ui/model.go`, not in implementor packages 
 | `styleRenderer` | `AnnotationInline()`, `DiffCursor()`, `StatusBarSeparator()`, `FileStatusMark()`, `FileReviewedMark()`, `FileAnnotationMark()` | `style.Renderer` |
 | `sgrProcessor` | `Reemit()` | `style.SGR` |
 | `wordDiffer` | `ComputeIntraRanges()`, `PairLines()`, `InsertHighlightMarkers()` | `worddiff.Differ` |
-| `FileTreeComponent` | 17 methods (navigation, query, mutation, scroll-state, render) | `sidepane.FileTree` |
+| `FileTreeComponent` | Navigation, directory toggling, query, mutation, scroll-state, and render methods | `sidepane.FileTree` |
 | `TOCComponent` | 9 methods (navigation, cursor/section query+set, scroll-state, render) | `sidepane.TOC` |
 | `overlayManager` | `Active()`, `Kind()`, `OpenHelp()`, `OpenAnnotList()`, `OpenThemeSelect()`, `OpenInfo()`, `UpdateInfo()`, `Close()`, `HandleKey()`, `HandleMouse()`, `Compose()` | `overlay.Manager` |
 | `ThemeCatalog` | `Entries()`, `Resolve()`, `Persist()` | `themeCatalog` adapter in `app/themes.go` (composes `theme.Catalog` + config persistence) |

@@ -905,15 +905,15 @@ func TestModel_TreeHomeEndMoveToBoundaries(t *testing.T) {
 	m.tree.Move(sidepane.MotionDown)
 	assert.NotEqual(t, "cmd/main.go", m.tree.SelectedFile())
 
-	// end should move to last file
+	// end should move to the last visible entry
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnd})
 	model := result.(Model)
-	assert.Equal(t, "pkg/util.go", model.tree.SelectedFile(), "End in tree should move to last file")
+	assert.Equal(t, "pkg/util.go", model.tree.SelectedFile(), "End in tree should move to the last visible entry")
 
-	// home should move to first file
+	// home should move to the first visible entry, which is the cmd directory
 	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyHome})
 	model = result.(Model)
-	assert.Equal(t, "cmd/main.go", model.tree.SelectedFile(), "Home in tree should move to first file")
+	assert.Empty(t, model.tree.SelectedFile(), "Home in tree should move to the first directory")
 }
 func TestModel_TreeScrollOffsetPersistsAcrossUpdates(t *testing.T) {
 	// many files so tree needs scrolling at the given height
