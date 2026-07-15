@@ -38,7 +38,7 @@ func mockEditor(content string, cmdErr error) *mocks.ExternalEditorMock {
 			}
 			return cmd, complete, nil
 		},
-		SourceCommandFunc: func(string, int) (*exec.Cmd, error) {
+		SourceCommandFunc: func(editor.SourceRequest) (*exec.Cmd, error) {
 			return exec.Command("/bin/true"), nil
 		},
 	}
@@ -49,7 +49,7 @@ func mockSourceEditor(err error) *mocks.ExternalEditorMock {
 		CommandFunc: func(string) (*exec.Cmd, func(error) (string, error), error) {
 			return exec.Command("/bin/true"), func(error) (string, error) { return "", nil }, nil
 		},
-		SourceCommandFunc: func(string, int) (*exec.Cmd, error) {
+		SourceCommandFunc: func(editor.SourceRequest) (*exec.Cmd, error) {
 			if err != nil {
 				return nil, err
 			}
@@ -235,6 +235,7 @@ func TestSourceEditorTarget_LineResolution(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, filepath.Join(workDir, "a.go"), got.sourcePath)
+			assert.Equal(t, workDir, got.sourceRoot)
 			assert.Equal(t, tt.wantLine, got.sourceLine)
 		})
 	}
@@ -358,6 +359,7 @@ func TestSourceEditorTarget_AbsoluteFilePathUsesOriginalPath(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, standaloneFile, got.sourcePath)
+	assert.Equal(t, workDir, got.sourceRoot)
 	assert.Equal(t, 1, got.sourceLine)
 }
 
@@ -382,6 +384,7 @@ func TestSourceEditorTarget_CompareFileUsesExactNewPath(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, compareNew, got.sourcePath)
+	assert.Equal(t, compareDir, got.sourceRoot)
 	assert.Equal(t, 1, got.sourceLine)
 	assert.False(t, got.reloadAfterCleanExit)
 }
@@ -648,8 +651,9 @@ func TestOpenSourceEditor_WorktreeReviewFileAnnotationAllows(t *testing.T) {
 
 	require.NotNil(t, cmd)
 	require.Len(t, fake.SourceCommandCalls(), 1)
-	assert.Equal(t, filepath.Join(workDir, "a.go"), fake.SourceCommandCalls()[0].Path)
-	assert.Equal(t, 1, fake.SourceCommandCalls()[0].Line)
+	assert.Equal(t, filepath.Join(workDir, "a.go"), fake.SourceCommandCalls()[0].Req.Path)
+	assert.Equal(t, workDir, fake.SourceCommandCalls()[0].Req.Root)
+	assert.Equal(t, 1, fake.SourceCommandCalls()[0].Req.Line)
 }
 
 func TestSourceEditorTarget_NonWorktreeReviewLineAnnotationAllows(t *testing.T) {
@@ -841,8 +845,9 @@ func TestHandleDiffAction_OpenFileInEditor(t *testing.T) {
 	require.NotNil(t, cmd)
 	assert.IsType(t, Model{}, model)
 	require.Len(t, fake.SourceCommandCalls(), 1)
-	assert.Equal(t, filepath.Join(workDir, "a.go"), fake.SourceCommandCalls()[0].Path)
-	assert.Equal(t, 2, fake.SourceCommandCalls()[0].Line)
+	assert.Equal(t, filepath.Join(workDir, "a.go"), fake.SourceCommandCalls()[0].Req.Path)
+	assert.Equal(t, workDir, fake.SourceCommandCalls()[0].Req.Root)
+	assert.Equal(t, 2, fake.SourceCommandCalls()[0].Req.Line)
 }
 
 func TestHandleDiffAction_OpenFileInEditorNoopKeepsHint(t *testing.T) {
