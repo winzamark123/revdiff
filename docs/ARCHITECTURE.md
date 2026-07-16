@@ -141,13 +141,13 @@ Three main types:
 - **`Renderer`** — compound ANSI rendering for elements that need raw ANSI (not lipgloss). Methods: `AnnotationInline()`, `DiffCursor()`, `StatusBarSeparator()`, `FileStatusMark()`, `FileReviewedMark()`, `FileAnnotationMark()`
 - **`SGR`** — ANSI SGR stream processor. `Reemit()` re-prepends active fg/bg/bold/italic state at continuation line starts (needed for wrap mode because `ansi.Wrap` doesn't preserve SGR across newlines)
 
-### app/ui/sidepane/ — left-pane navigation
+### app/ui/sidepane/ — navigation pane
 
 Two independent component types, both with cursor/offset management, rendering, and keyboard navigation:
 - **`FileTree`** — file tree sidebar. Supports navigation (`Move`/`StepFile`), filtering (annotated-only), semantic-fingerprint reviewed tracking, directory grouping. File-list reloads revalidate only paths reviewed before the load; marks added during the load are reconciled when that file's refreshed diff arrives.
 - **`TOC`** — markdown table-of-contents. Activated for single-file full-context markdown. Active section tracking, header-level navigation
 
-Both constructed via factory closures in `main.go`, consumed through `FileTreeComponent`/`TOCComponent` interfaces.
+Both are constructed via factory closures in `main.go`, consumed through `FileTreeComponent`/`TOCComponent` interfaces, and rendered on the left or right according to `tree-position`.
 
 ### app/ui/overlay/ — popup layers
 
