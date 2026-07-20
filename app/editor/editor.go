@@ -49,14 +49,24 @@ func (e Editor) Command(content string) (*exec.Cmd, func(error) (string, error),
 	return cmd, complete, nil
 }
 
+// SourceRequest describes an existing source file to open. Root is the stable
+// workspace root when the review mode has one; editors without workspace-aware
+// CLI behavior ignore it.
+type SourceRequest struct {
+	Path string
+	Root string
+	Line int
+}
+
 // SourceCommand prepares an editor invocation for an existing source file.
-// Known editors receive best-effort line-navigation arguments; unknown editors
-// receive only the path so the command remains shell-free and predictable.
-func (e Editor) SourceCommand(path string, line int) (*exec.Cmd, error) {
-	if path == "" {
+// Known editors receive best-effort line-navigation arguments; Zed also
+// receives the workspace root so its project tree remains available. Unknown
+// editors receive only the path so the command remains shell-free and predictable.
+func (e Editor) SourceCommand(req SourceRequest) (*exec.Cmd, error) {
+	if req.Path == "" {
 		return nil, ErrSourceMissing
 	}
-	stat, err := os.Stat(path)
+	stat, err := os.Stat(req.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrSourceMissing
@@ -70,18 +80,27 @@ func (e Editor) SourceCommand(path string, line int) (*exec.Cmd, error) {
 	mode := editorLineSyntax(argv[0])
 	switch mode {
 	case editorPlusLine:
-		if line > 0 {
-			argv = append(argv, "+"+strconv.Itoa(line))
+		if req.Line > 0 {
+			argv = append(argv, "+"+strconv.Itoa(req.Line))
 		}
-		argv = append(argv, path)
+		argv = append(argv, req.Path)
 	case editorGotoLine:
-		if line > 0 {
-			argv = append(argv, "--goto", path+":"+strconv.Itoa(line))
+		if req.Line > 0 {
+			argv = append(argv, "--goto", req.Path+":"+strconv.Itoa(req.Line))
 		} else {
-			argv = append(argv, path)
+			argv = append(argv, req.Path)
 		}
+	case editorZedLine:
+		if req.Root != "" {
+			argv = append(argv, req.Root)
+		}
+		target := req.Path
+		if req.Line > 0 {
+			target += ":" + strconv.Itoa(req.Line)
+		}
+		argv = append(argv, target)
 	case editorPlainLine:
-		argv = append(argv, path)
+		argv = append(argv, req.Path)
 	default:
 		// editorLineMode values come from private code in this file. An
 		// unrecognized mode means SourceCommand and editorLineSyntax disagree;
@@ -104,6 +123,9 @@ const (
 
 	// editorGotoLine uses "--goto path:N", as VS Code-family editors do.
 	editorGotoLine
+
+	// editorZedLine opens the workspace root followed by "path:N".
+	editorZedLine
 )
 
 func editorLineSyntax(program string) editorLineMode {
@@ -112,6 +134,8 @@ func editorLineSyntax(program string) editorLineMode {
 		return editorPlusLine
 	case "code", "code-insiders", "codium", "cursor":
 		return editorGotoLine
+	case "zed", "zeditor":
+		return editorZedLine
 	default:
 		return editorPlainLine
 	}

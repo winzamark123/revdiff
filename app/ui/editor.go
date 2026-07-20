@@ -28,7 +28,7 @@ type ExternalEditor interface {
 	// complete function also handles any temp-file cleanup.
 	Command(content string) (*exec.Cmd, func(error) (string, error), error)
 	// SourceCommand prepares the editor invocation for an existing source file.
-	SourceCommand(path string, line int) (*exec.Cmd, error)
+	SourceCommand(req editor.SourceRequest) (*exec.Cmd, error)
 }
 
 // editorFinishedMsg is dispatched after the external editor spawned via Ctrl+E
@@ -125,6 +125,9 @@ type sourceEditorTargetResult struct {
 	// sourcePath is the source file passed to ExternalEditor.
 	sourcePath string
 
+	// sourceRoot is the stable workspace root passed to workspace-aware editors.
+	sourceRoot string
+
 	// sourceLine is the optional one-based line passed to ExternalEditor.
 	sourceLine int
 
@@ -139,7 +142,11 @@ func (m *Model) openSourceEditor() tea.Cmd {
 		m.editorState.hint = fmt.Sprintf("Editor unavailable: %v", err)
 		return nil
 	}
-	cmd, err := m.editor.SourceCommand(result.sourcePath, result.sourceLine)
+	cmd, err := m.editor.SourceCommand(editor.SourceRequest{
+		Path: result.sourcePath,
+		Root: result.sourceRoot,
+		Line: result.sourceLine,
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, editor.ErrSourceMissing):
@@ -218,6 +225,7 @@ func (m Model) sourceEditorTarget() (sourceEditorTargetResult, error) {
 	return sourceEditorTargetResult{
 		fileName:             m.file.name,
 		sourcePath:           targetPath,
+		sourceRoot:           policy.Root,
 		sourceLine:           targetLine,
 		reloadAfterCleanExit: policy.ReloadAfterCleanExit,
 	}, nil

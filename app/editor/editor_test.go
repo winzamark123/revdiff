@@ -173,7 +173,8 @@ func TestEditor_Command_TempFileCreateFailurePropagates(t *testing.T) {
 }
 
 func TestEditor_SourceCommand_LineSyntax(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "a.go")
+	root := t.TempDir()
+	file := filepath.Join(root, "a.go")
 	require.NoError(t, os.WriteFile(file, []byte("package main\n"), 0o600))
 	tests := []struct {
 		name   string
@@ -189,7 +190,9 @@ func TestEditor_SourceCommand_LineSyntax(t *testing.T) {
 		{"code insiders", "code-insiders", 42, []string{"code-insiders", "--goto", file + ":42"}},
 		{"codium", "codium", 42, []string{"codium", "--goto", file + ":42"}},
 		{"cursor", "cursor", 42, []string{"cursor", "--goto", file + ":42"}},
-		{"unknown with line", "zed --reuse-window", 42, []string{"zed", "--reuse-window", file}},
+		{"zed with args", "zed --existing", 42, []string{"zed", "--existing", root, file + ":42"}},
+		{"zeditor without line", "zeditor", 0, []string{"zeditor", root, file}},
+		{"unknown with line", "emacs --no-window-system", 42, []string{"emacs", "--no-window-system", file}},
 		{"known without line", "vim", 0, []string{"vim", file}},
 	}
 	for _, tt := range tests {
@@ -197,7 +200,7 @@ func TestEditor_SourceCommand_LineSyntax(t *testing.T) {
 			t.Setenv("EDITOR", tt.editor)
 			t.Setenv("VISUAL", "")
 
-			cmd, err := Editor{}.SourceCommand(file, tt.line)
+			cmd, err := Editor{}.SourceCommand(SourceRequest{Path: file, Root: root, Line: tt.line})
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, cmd.Args)
@@ -206,15 +209,36 @@ func TestEditor_SourceCommand_LineSyntax(t *testing.T) {
 }
 
 func TestEditor_SourceCommand_RecognizesEditorBasename(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "a.go")
+	root := t.TempDir()
+	file := filepath.Join(root, "a.go")
 	require.NoError(t, os.WriteFile(file, []byte("package main\n"), 0o600))
-	t.Setenv("EDITOR", "/usr/local/bin/nvim --clean")
 	t.Setenv("VISUAL", "")
 
-	cmd, err := Editor{}.SourceCommand(file, 7)
+	t.Run("nvim", func(t *testing.T) {
+		t.Setenv("EDITOR", "/usr/local/bin/nvim --clean")
+		cmd, err := Editor{}.SourceCommand(SourceRequest{Path: file, Root: root, Line: 7})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"/usr/local/bin/nvim", "--clean", "+7", file}, cmd.Args)
+	})
+
+	t.Run("zed", func(t *testing.T) {
+		t.Setenv("EDITOR", "/usr/local/bin/zed")
+		cmd, err := Editor{}.SourceCommand(SourceRequest{Path: file, Root: root, Line: 7})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"/usr/local/bin/zed", root, file + ":7"}, cmd.Args)
+	})
+}
+
+func TestEditor_SourceCommand_ZedWithoutRootStillOpensFile(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "a.go")
+	require.NoError(t, os.WriteFile(file, []byte("package main\n"), 0o600))
+	t.Setenv("EDITOR", "zed")
+	t.Setenv("VISUAL", "")
+
+	cmd, err := Editor{}.SourceCommand(SourceRequest{Path: file, Line: 7})
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"/usr/local/bin/nvim", "--clean", "+7", file}, cmd.Args)
+	assert.Equal(t, []string{"zed", file + ":7"}, cmd.Args)
 }
 
 func TestEditor_SourceCommand_ValidatesSourcePath(t *testing.T) {
@@ -224,7 +248,7 @@ func TestEditor_SourceCommand_ValidatesSourcePath(t *testing.T) {
 	t.Setenv("EDITOR", "/bin/true")
 	t.Setenv("VISUAL", "")
 
-	cmd, err := Editor{}.SourceCommand(file, 3)
+	cmd, err := Editor{}.SourceCommand(SourceRequest{Path: file, Root: dir, Line: 3})
 
 	require.NoError(t, err)
 	require.NotNil(t, cmd)
@@ -233,13 +257,13 @@ func TestEditor_SourceCommand_ValidatesSourcePath(t *testing.T) {
 }
 
 func TestEditor_SourceCommand_MissingSource(t *testing.T) {
-	_, err := Editor{}.SourceCommand(filepath.Join(t.TempDir(), "missing.go"), 0)
+	_, err := Editor{}.SourceCommand(SourceRequest{Path: filepath.Join(t.TempDir(), "missing.go")})
 
 	assert.ErrorIs(t, err, ErrSourceMissing)
 }
 
 func TestEditor_SourceCommand_NonRegularSource(t *testing.T) {
-	_, err := Editor{}.SourceCommand(t.TempDir(), 0)
+	_, err := Editor{}.SourceCommand(SourceRequest{Path: t.TempDir()})
 
 	assert.ErrorIs(t, err, ErrSourceNotRegular)
 }
