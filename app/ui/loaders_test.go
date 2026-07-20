@@ -1680,6 +1680,164 @@ func TestModel_ReloadCurrentFileNoOpWhenEmpty(t *testing.T) {
 	assert.Equal(t, beforeSeq, m.file.loadSeq, "no load implies no seq bump")
 }
 
+func TestModel_CaptureCompactAnchor(t *testing.T) {
+	lines := []diff.DiffLine{
+		{NewNum: 10, Content: "ctx", ChangeType: diff.ChangeContext},
+		{OldNum: 11, Content: "removed", ChangeType: diff.ChangeRemove},
+		{NewNum: 12, Content: "added", ChangeType: diff.ChangeAdd},
+	}
+
+	t.Run("nil when no file loaded", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = ""
+		m.file.lines = lines
+		m.nav.diffCursor = 1
+		assert.Nil(t, m.captureCompactAnchor())
+	})
+
+	t.Run("nil when cursor out of range", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.file.lines = lines
+		m.nav.diffCursor = 99
+		assert.Nil(t, m.captureCompactAnchor())
+	})
+
+	t.Run("nil when cursor negative", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.file.lines = lines
+		m.nav.diffCursor = -1
+		assert.Nil(t, m.captureCompactAnchor())
+	})
+
+	t.Run("captures added line by new number", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.file.lines = lines
+		m.nav.diffCursor = 2
+		a := m.captureCompactAnchor()
+		require.NotNil(t, a)
+		assert.Equal(t, 12, a.srcLine)
+		assert.Equal(t, diff.ChangeAdd, a.changeType)
+		assert.Equal(t, 0, a.hunkIdx) // single hunk starts at index 1
+	})
+
+	t.Run("captures removed line by old number", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.file.lines = lines
+		m.nav.diffCursor = 1
+		a := m.captureCompactAnchor()
+		require.NotNil(t, a)
+		assert.Equal(t, 11, a.srcLine)
+		assert.Equal(t, diff.ChangeRemove, a.changeType)
+	})
+}
+
+func TestModel_ApplyCompactAnchor(t *testing.T) {
+	t.Run("restores cursor to matching change line", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.file.lines = []diff.DiffLine{
+			{ChangeType: diff.ChangeDivider},
+			{NewNum: 40, Content: "c", ChangeType: diff.ChangeContext},
+			{NewNum: 41, Content: "add", ChangeType: diff.ChangeAdd},
+		}
+		m.applyCompactAnchor(&compactAnchor{srcLine: 41, changeType: diff.ChangeAdd, hunkIdx: 0})
+		assert.Equal(t, 2, m.nav.diffCursor)
+	})
+
+	t.Run("falls back to nearest hunk when line absent", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.file.lines = []diff.DiffLine{
+			{ChangeType: diff.ChangeDivider},
+			{NewNum: 40, Content: "c", ChangeType: diff.ChangeContext},
+			{NewNum: 41, Content: "add", ChangeType: diff.ChangeAdd},
+		}
+		// context line NewNum 5 not present → fall back to hunk 0 (index 2)
+		m.applyCompactAnchor(&compactAnchor{srcLine: 5, changeType: diff.ChangeContext, hunkIdx: 0})
+		assert.Equal(t, 2, m.nav.diffCursor)
+	})
+
+	t.Run("divider anchor skips line lookup and uses hunk", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.file.lines = []diff.DiffLine{
+			{ChangeType: diff.ChangeDivider},
+			{NewNum: 40, Content: "c", ChangeType: diff.ChangeContext},
+			{NewNum: 41, Content: "add", ChangeType: diff.ChangeAdd},
+		}
+		// hunk 0 starts at index 2; skipInitialDividers would land on index 1
+		// (the context line), so cursor==2 proves the hunk-fallback branch ran
+		m.applyCompactAnchor(&compactAnchor{srcLine: 0, changeType: diff.ChangeDivider, hunkIdx: 0})
+		assert.Equal(t, 2, m.nav.diffCursor)
+	})
+
+	t.Run("skips to first visible line when no hunks", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.file.lines = []diff.DiffLine{
+			{ChangeType: diff.ChangeDivider},
+			{NewNum: 40, Content: "c", ChangeType: diff.ChangeContext},
+			{NewNum: 41, Content: "d", ChangeType: diff.ChangeContext},
+		}
+		m.applyCompactAnchor(&compactAnchor{srcLine: 999, changeType: diff.ChangeContext, hunkIdx: -1})
+		assert.Equal(t, 1, m.nav.diffCursor) // skipInitialDividers lands on first non-divider
+	})
+
+	t.Run("restores cursor to matching removed line by old number", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.file.lines = []diff.DiffLine{
+			{ChangeType: diff.ChangeDivider},
+			{NewNum: 40, Content: "c", ChangeType: diff.ChangeContext},
+			{OldNum: 88, Content: "removed", ChangeType: diff.ChangeRemove},
+			{NewNum: 41, Content: "added", ChangeType: diff.ChangeAdd},
+		}
+		// findDiffLineIndex resolves a remove anchor by OldNum, not NewNum
+		m.applyCompactAnchor(&compactAnchor{srcLine: 88, changeType: diff.ChangeRemove, hunkIdx: 0})
+		assert.Equal(t, 2, m.nav.diffCursor)
+	})
+
+	t.Run("collapsed mode keeps restored cursor visible", func(t *testing.T) {
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.modes.collapsed.enabled = true
+		m.file.lines = []diff.DiffLine{
+			{ChangeType: diff.ChangeDivider},
+			{NewNum: 40, Content: "c", ChangeType: diff.ChangeContext},
+			{OldNum: 88, Content: "removed", ChangeType: diff.ChangeRemove},
+			{NewNum: 41, Content: "added", ChangeType: diff.ChangeAdd},
+		}
+		// the removed line (index 2) is collapsed-hidden; adjustCursorIfHidden must
+		// nudge the cursor to the nearest visible line (the added line at index 3)
+		m.applyCompactAnchor(&compactAnchor{srcLine: 88, changeType: diff.ChangeRemove, hunkIdx: 0})
+		assert.Equal(t, 3, m.nav.diffCursor)
+		assert.False(t, m.isCollapsedHidden(m.nav.diffCursor, m.findHunks()),
+			"restored cursor must be on a visible line in collapsed mode")
+	})
+}
+
+func TestModel_HandleFileLoaded_DropsStaleCompactAnchor(t *testing.T) {
+	m := testModel([]string{"a.go"}, nil)
+	m.file.name = "a.go"
+	m.file.loadSeq = 5
+	// stale anchor: its seq predates the current load, so the seq guard must drop
+	// it and fall through to the default top positioning rather than reposition
+	m.compact.pendingAnchor = &compactAnchor{seq: 4, srcLine: 41, changeType: diff.ChangeAdd, hunkIdx: 0}
+	msg := fileLoadedMsg{file: "a.go", seq: 5, lines: []diff.DiffLine{
+		{ChangeType: diff.ChangeDivider},
+		{NewNum: 40, Content: "c", ChangeType: diff.ChangeContext},
+		{NewNum: 41, Content: "add", ChangeType: diff.ChangeAdd},
+	}}
+	result, _ := m.handleFileLoaded(msg)
+	model := result.(Model)
+	assert.Nil(t, model.compact.pendingAnchor, "stale anchor must be cleared")
+	assert.Equal(t, 1, model.nav.diffCursor, "stale anchor must not reposition; cursor resets to first visible line")
+}
+
 func TestModel_LoadFilesReconcilesReviewedFingerprints(t *testing.T) {
 	entry := diff.FileEntry{Path: "a.go", Status: diff.FileModified}
 	original := []diff.DiffLine{
@@ -1858,4 +2016,70 @@ func TestModel_FilesReloadPreservesUnreviewedAutoAdvanceSelection(t *testing.T) 
 
 	assert.Equal(t, "c.go", m.tree.SelectedFile(), "reload must not jump back to the first unreviewed file")
 	assert.NotNil(t, followupCmd, "reload should issue a fresh load for the preserved selection")
+}
+
+func TestModel_FilesReloadPreservesUnreviewedScrollOffset(t *testing.T) {
+	entries := []diff.FileEntry{
+		{Path: "a.go"}, {Path: "b.go"}, {Path: "c.go"}, {Path: "d.go"}, {Path: "e.go"},
+		{Path: "f.go"}, {Path: "g.go"}, {Path: "h.go"}, {Path: "i.go"},
+	}
+	m := testModel(nil, nil)
+	m.tree.Rebuild(entries)
+	m.tree.SetReviewed("a.go", "fp-a")
+	m.tree.SetReviewed("b.go", "fp-b")
+	reviewed := map[string]string{"a.go": "fp-a", "b.go": "fp-b"}
+	m.tree.ToggleUnreviewedFilter()
+	require.True(t, m.tree.SelectByPath("h.go"))
+	m.tree.EnsureVisible(5)
+	m.tree.Move(sidepane.MotionUp)
+	m.tree.Move(sidepane.MotionUp)
+	require.Equal(t, "f.go", m.tree.SelectedFile())
+	require.True(t, m.tree.SelectByVisibleRow(2))
+	require.Equal(t, "f.go", m.tree.SelectedFile(), "selected file starts in the middle of the viewport")
+
+	m.file.name = "f.go"
+	for range 3 {
+		m.triggerReload()
+		result, _ := m.Update(filesLoadedMsg{
+			seq: m.filesLoadSeq, entries: entries,
+			reviewedBefore: reviewed, reviewedFingerprints: reviewed,
+		})
+		m = result.(Model)
+		m.tree.EnsureVisible(5)
+
+		assert.Equal(t, "f.go", m.tree.SelectedFile())
+		require.True(t, m.tree.SelectByVisibleRow(2))
+		require.Equal(t, "f.go", m.tree.SelectedFile(), "repeated reloads should keep the selected file on the same row")
+	}
+}
+
+func TestModel_FilesReloadPreservesVisibleRowWhenFilesAboveChange(t *testing.T) {
+	entries := []diff.FileEntry{
+		{Path: "a.go"}, {Path: "b.go"}, {Path: "c.go"}, {Path: "d.go"}, {Path: "e.go"},
+		{Path: "f.go"}, {Path: "g.go"}, {Path: "h.go"}, {Path: "i.go"},
+	}
+	m := testModel(nil, nil)
+	m.tree.Rebuild(entries)
+	m.tree.ToggleUnreviewedFilter()
+	require.True(t, m.tree.SelectByPath("h.go"))
+	m.tree.EnsureVisible(5)
+	m.tree.Move(sidepane.MotionUp)
+	m.tree.Move(sidepane.MotionUp)
+	require.Equal(t, "f.go", m.tree.SelectedFile())
+	require.True(t, m.tree.SelectByVisibleRow(2))
+	require.Equal(t, "f.go", m.tree.SelectedFile(), "selected file starts in the middle of the viewport")
+
+	m.file.name = "f.go"
+	m.triggerReload()
+	reloaded := []diff.FileEntry{
+		{Path: "a.go"}, {Path: "d.go"}, {Path: "e.go"}, {Path: "f.go"},
+		{Path: "g.go"}, {Path: "h.go"}, {Path: "i.go"},
+	}
+	result, _ := m.Update(filesLoadedMsg{seq: m.filesLoadSeq, entries: reloaded})
+	m = result.(Model)
+	m.tree.EnsureVisible(5)
+
+	assert.Equal(t, "f.go", m.tree.SelectedFile())
+	require.True(t, m.tree.SelectByVisibleRow(2))
+	require.Equal(t, "f.go", m.tree.SelectedFile(), "reload should preserve the row when files above disappear")
 }

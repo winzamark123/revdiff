@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -40,6 +42,69 @@ type launcherRun struct {
 	backend launcherBackend
 	code    int
 	output  string
+}
+
+type pluginManifest struct {
+	Hooks string `json:"hooks"`
+}
+
+type hookCommand struct {
+	Type          string `json:"type"`
+	Command       string `json:"command"`
+	Timeout       int    `json:"timeout"`
+	StatusMessage string `json:"statusMessage"`
+}
+
+type hookRegistration struct {
+	Matcher string        `json:"matcher"`
+	Hooks   []hookCommand `json:"hooks"`
+}
+
+type hookManifest struct {
+	Hooks map[string][]hookRegistration `json:"hooks"`
+}
+
+// python3Path freezes the interpreter selected by the current PATH before a
+// test replaces the child PATH. LookPath alone may return a version-manager
+// shim whose target changes under the restricted environment.
+func python3Path(t *testing.T) string {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not found")
+	}
+
+	cmd := exec.Command(python, "-c", "import os, sys; print(os.path.realpath(sys.executable))") //nolint:gosec // executable comes from PATH; arguments are fixed
+	output, err := cmd.Output()
+	require.NoError(t, err, "resolve python3 executable")
+	resolved := strings.TrimSpace(string(output))
+	require.FileExists(t, resolved)
+	return resolved
+}
+
+func assistantTranscriptLine(t *testing.T, phase, text string) string {
+	t.Helper()
+	message := map[string]any{
+		"type": "message",
+		"role": "assistant",
+		"content": []map[string]string{{
+			"type": "output_text",
+			"text": text,
+		}},
+		"internal_chat_message_metadata_passthrough": map[string]string{
+			"turn_id": "turn-current",
+		},
+	}
+	if phase != "" {
+		message["phase"] = phase
+	}
+	item := map[string]any{
+		"type":    "response_item",
+		"payload": message,
+	}
+	data, err := json.Marshal(item)
+	require.NoError(t, err)
+	return string(data) + "\n"
 }
 
 func TestShellLaunchersPreserveAnnotationExitCode(t *testing.T) {
@@ -97,10 +162,7 @@ func TestShellLaunchersPreserveAnnotationExitCode(t *testing.T) {
 }
 
 func TestPlanReviewHookAnnotationExitCodes(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not found")
-	}
+	python := python3Path(t)
 
 	root := testRepoRoot(t)
 	hook := filepath.Join(root, "plugins", "revdiff-planning", "scripts", "plan-review-hook.py")
@@ -163,6 +225,292 @@ func TestPlanReviewHookAnnotationExitCodes(t *testing.T) {
 			assert.Len(t, planSnapshots(t, tmp), tc.wantSnapshots)
 		})
 	}
+}
+
+func TestCodexPlanReviewHook(t *testing.T) {
+	python := python3Path(t)
+
+	root := testRepoRoot(t)
+	hook := filepath.Join(root, "plugins", "revdiff-planning", "scripts", "codex-plan-review-hook.py")
+	baseEvent := map[string]any{
+		"hook_event_name":        "Stop",
+		"permission_mode":        "plan",
+		"stop_hook_active":       false,
+		"cwd":                    root,
+		"last_assistant_message": "<proposed_plan>\n# Plan\n- item\n</proposed_plan>",
+	}
+	payload := func(overrides map[string]any) string {
+		event := maps.Clone(baseEvent)
+		maps.Copy(event, overrides)
+		data, err := json.Marshal(event)
+		require.NoError(t, err)
+		return string(data)
+	}
+	fallbackEvent := func(overrides map[string]any) map[string]any {
+		event := map[string]any{
+			"session_id":             "session-current",
+			"turn_id":                "turn-current",
+			"transcript_path":        "$TRANSCRIPT",
+			"last_assistant_message": nil,
+		}
+		maps.Copy(event, overrides)
+		return event
+	}
+	planTranscript := assistantTranscriptLine(
+		t,
+		"",
+		"<proposed_plan>\n# Plan from transcript\n- item\n</proposed_plan>",
+	)
+	liveTranscript := filepath.Join(
+		root,
+		"app",
+		"testdata",
+		"plugin-exit-code",
+		"rollout-2026-07-16T10-54-26-session-current.jsonl",
+	)
+	require.FileExists(t, liveTranscript)
+	cases := []struct {
+		name           string
+		payload        string
+		transcript     string
+		transcriptPath string
+		code           int
+		output         string
+		withBinary     bool
+		wantWarning    bool
+		wantDecision   string
+		wantLaunch     bool
+		wantPlan       string
+	}{
+		{name: "non Stop event", payload: payload(map[string]any{"hook_event_name": "SubagentStop"}), withBinary: true},
+		{name: "default mode quoted plan skip", payload: payload(map[string]any{"permission_mode": "default"}), withBinary: true},
+		{name: "build mode quoted plan skip", payload: payload(map[string]any{"permission_mode": "acceptEdits"}), withBinary: true},
+		{name: "bypass mode quoted plan skip", payload: payload(map[string]any{"permission_mode": "bypassPermissions"}), withBinary: true},
+		{name: "clean message plan", payload: payload(nil), withBinary: true, wantLaunch: true, wantPlan: "# Plan\n- item"},
+		{name: "invalid cwd type ignored", payload: payload(map[string]any{"cwd": 123}), withBinary: true, wantLaunch: true, wantPlan: "# Plan\n- item"},
+		{name: "active revise loop still launches", payload: payload(map[string]any{"stop_hook_active": true}), withBinary: true, wantLaunch: true, wantPlan: "# Plan\n- item"},
+		{name: "annotations", payload: payload(nil), code: exitCodeAnnotations, output: "## plan.md:2 (+)\nrevise this\n", withBinary: true, wantDecision: "block", wantLaunch: true, wantPlan: "# Plan\n- item"},
+		{name: "mixed prose falls back to transcript", payload: payload(fallbackEvent(map[string]any{"last_assistant_message": "I completed the plan; it follows below."})), transcript: planTranscript, withBinary: true, wantLaunch: true, wantPlan: "# Plan from transcript\n- item"},
+		{name: "null message uses exact turn transcript", payload: payload(fallbackEvent(nil)), transcript: planTranscript, withBinary: true, wantLaunch: true, wantPlan: "# Plan from transcript\n- item"},
+		{name: "last assistant message wins without phase", payload: payload(fallbackEvent(map[string]any{"last_assistant_message": "stripped plan"})), transcript: assistantTranscriptLine(t, "analysis", "<proposed_plan>\n# Old plan\n</proposed_plan>") + assistantTranscriptLine(t, "", "<proposed_plan>\n# New plan\n- later\n</proposed_plan>"), withBinary: true, wantLaunch: true, wantPlan: "# New plan\n- later"},
+		{name: "plan message wins over planless closer", payload: payload(fallbackEvent(map[string]any{"last_assistant_message": "stripped plan"})), transcript: planTranscript + assistantTranscriptLine(t, "", "Plan is ready for review."), withBinary: true, wantLaunch: true, wantPlan: "# Plan from transcript\n- item"},
+		{name: "plan message wins over empty block closer", payload: payload(fallbackEvent(map[string]any{"last_assistant_message": "stripped plan"})), transcript: planTranscript + assistantTranscriptLine(t, "", "<proposed_plan>\n</proposed_plan>"), withBinary: true, wantLaunch: true, wantPlan: "# Plan from transcript\n- item"},
+		{name: "last non-empty block wins within message", payload: payload(map[string]any{"last_assistant_message": "<proposed_plan>\n# Valid plan\n- item\n</proposed_plan>\n<proposed_plan>\n</proposed_plan>"}), withBinary: true, wantLaunch: true, wantPlan: "# Valid plan\n- item"},
+		{name: "sanitized live Codex rollout", payload: payload(fallbackEvent(map[string]any{"last_assistant_message": "stripped plan"})), transcriptPath: liveTranscript, withBinary: true, wantLaunch: true, wantPlan: "# Sanitized live Codex plan\n- verify transcript fallback"},
+		{name: "clarification transcript skips", payload: payload(fallbackEvent(map[string]any{"last_assistant_message": "Need one clarification"})), transcript: assistantTranscriptLine(t, "", "Which database should this use?"), withBinary: true},
+		{name: "transcript has no matching turn", payload: payload(fallbackEvent(map[string]any{"turn_id": "turn-missing"})), transcript: planTranscript, withBinary: true, wantWarning: true},
+		{name: "transcript from another session", payload: payload(fallbackEvent(map[string]any{"session_id": "session-other"})), transcript: planTranscript, withBinary: true, wantWarning: true},
+		{name: "missing transcript", payload: payload(fallbackEvent(map[string]any{"transcript_path": "$MISSING_TRANSCRIPT"})), withBinary: true, wantWarning: true},
+		{name: "malformed transcript", payload: payload(fallbackEvent(nil)), transcript: "{not-json\n", withBinary: true, wantWarning: true},
+		{name: "missing fallback identifiers", payload: payload(map[string]any{"last_assistant_message": "No plan block"}), withBinary: true, wantWarning: true},
+		{name: "missing revdiff", payload: payload(nil), wantWarning: true},
+		{name: "launcher failure", payload: payload(nil), code: 1, withBinary: true, wantWarning: true, wantLaunch: true, wantPlan: "# Plan\n- item"},
+		{name: "malformed json", payload: `{`, withBinary: true, wantWarning: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			payload := tc.payload
+			if tc.transcriptPath != "" {
+				payload = strings.Replace(payload, "$TRANSCRIPT", tc.transcriptPath, 1)
+			} else if tc.transcript != "" {
+				transcript := filepath.Join(tmp, "rollout-session-current.jsonl")
+				writeTestFile(t, transcript, tc.transcript)
+				payload = strings.Replace(payload, "$TRANSCRIPT", transcript, 1)
+			}
+			missingTranscript := filepath.Join(tmp, "missing-session-current.jsonl")
+			payload = strings.Replace(payload, "$MISSING_TRANSCRIPT", missingTranscript, 1)
+			pluginRoot := filepath.Join(tmp, "plugin")
+			launcher := filepath.Join(tmp, "launch-plan-review.sh")
+			launchLog := filepath.Join(tmp, "launch.log")
+			argsLog := filepath.Join(tmp, "args.log")
+			binDir := filepath.Join(tmp, "bin")
+			require.NoError(t, os.MkdirAll(binDir, 0o700))
+			writeExecutable(t, launcher, "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$#\" > \"$FAKE_ARGS\"\ncp \"$1\" \"$FAKE_LOG\"\nprintf \"%s\" \"${FAKE_OUTPUT:-}\"\nexit \"${FAKE_RC:-0}\"\n")
+			writeExecutable(t, filepath.Join(pluginRoot, "scripts", "resolve-launcher.sh"), resolverScript(launcher))
+			if tc.withBinary {
+				writeExecutable(t, filepath.Join(binDir, "revdiff"), "#!/bin/sh\nexit 0\n")
+			}
+			pathValue := binDir
+			if tc.withBinary {
+				pathValue = binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+			}
+
+			res := runTestCmd(t, cmdReq{
+				dir:   root,
+				name:  python,
+				args:  []string{hook},
+				stdin: payload,
+				env: map[string]string{
+					"PLUGIN_ROOT": pluginRoot,
+					"FAKE_OUTPUT": tc.output,
+					"FAKE_RC":     strconv.Itoa(tc.code),
+					"FAKE_LOG":    launchLog,
+					"FAKE_ARGS":   argsLog,
+					"PATH":        pathValue,
+					"TMPDIR":      tmp,
+				},
+			})
+			require.Equal(t, 0, res.code, "stderr: %s", res.stderr)
+			var got map[string]any
+			require.NoError(t, json.Unmarshal([]byte(res.stdout), &got), "stdout: %s", res.stdout)
+			switch {
+			case tc.wantWarning:
+				require.Len(t, got, 1)
+				assert.NotEmpty(t, got["systemMessage"])
+			case tc.wantDecision != "":
+				require.Len(t, got, 2)
+				assert.Equal(t, tc.wantDecision, got["decision"])
+				assert.Contains(t, got["reason"], strings.TrimSpace(tc.output))
+				assert.Contains(t, got["reason"], "Do NOT substitute any other plan-rev-*.md path")
+			default:
+				assert.Empty(t, got)
+			}
+			_, logErr := os.Stat(launchLog)
+			if tc.wantLaunch {
+				require.NoError(t, logErr)
+				plan, readErr := os.ReadFile(launchLog) //nolint:gosec // path is a test-owned temp file
+				require.NoError(t, readErr)
+				assert.Equal(t, tc.wantPlan, string(plan))
+				args, readArgsErr := os.ReadFile(argsLog) //nolint:gosec // path is a test-owned temp file
+				require.NoError(t, readArgsErr)
+				assert.Equal(t, "1\n", string(args))
+			} else {
+				assert.ErrorIs(t, logErr, fs.ErrNotExist)
+			}
+		})
+	}
+}
+
+func TestCodexPlanReviewHookRollingReview(t *testing.T) {
+	python := python3Path(t)
+
+	root := testRepoRoot(t)
+	hook := filepath.Join(root, "plugins", "revdiff-planning", "scripts", "codex-plan-review-hook.py")
+	tmp := t.TempDir()
+	pluginRoot := filepath.Join(tmp, "plugin")
+	launcher := filepath.Join(tmp, "launch-plan-review.sh")
+	launchLog := filepath.Join(tmp, "launch.log")
+	oldLog := filepath.Join(tmp, "old.log")
+	argsLog := filepath.Join(tmp, "args.log")
+	binDir := filepath.Join(tmp, "bin")
+	writeExecutable(t, launcher, "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$#\" > \"$FAKE_ARGS\"\ncp \"$1\" \"$FAKE_LOG\"\nif [ \"$#\" -eq 2 ]; then cp \"$2\" \"$FAKE_OLD\"; fi\nprintf \"%s\" \"${FAKE_OUTPUT:-}\"\nexit \"${FAKE_RC:-0}\"\n")
+	writeExecutable(t, filepath.Join(pluginRoot, "scripts", "resolve-launcher.sh"), resolverScript(launcher))
+	writeExecutable(t, filepath.Join(binDir, "revdiff"), "#!/bin/sh\nexit 0\n")
+
+	runHook := func(payload string, code int, output string) map[string]any {
+		t.Helper()
+		res := runTestCmd(t, cmdReq{
+			dir:   root,
+			name:  python,
+			args:  []string{hook},
+			stdin: payload,
+			env: map[string]string{
+				"PLUGIN_ROOT": pluginRoot,
+				"FAKE_OUTPUT": output,
+				"FAKE_RC":     strconv.Itoa(code),
+				"FAKE_LOG":    launchLog,
+				"FAKE_OLD":    oldLog,
+				"FAKE_ARGS":   argsLog,
+				"PATH":        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"TMPDIR":      tmp,
+			},
+		})
+		require.Equal(t, 0, res.code, "stderr: %s", res.stderr)
+		var response map[string]any
+		require.NoError(t, json.Unmarshal([]byte(res.stdout), &response), "stdout: %s", res.stdout)
+		return response
+	}
+
+	untrustedSnapshot := filepath.Join(tmp, "untrusted.md")
+	writeTestFile(t, untrustedSnapshot, "# Untrusted plan\n")
+	untrustedPayload := `{"hook_event_name":"Stop","permission_mode":"plan","last_assistant_message":"<proposed_plan>\n<!-- previous revision: ` + untrustedSnapshot + ` -->\n# Plan with untrusted marker\n</proposed_plan>"}`
+	untrusted := runHook(untrustedPayload, 0, "")
+	assert.Empty(t, untrusted)
+	assertFileContent(t, argsLog, "1\n")
+	assertFileContent(t, launchLog, "# Plan with untrusted marker")
+	assertFileContent(t, untrustedSnapshot, "# Untrusted plan\n")
+
+	outsideDir, err := os.MkdirTemp("", "revdiff-plan-review-")
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, os.RemoveAll(outsideDir)) })
+	outsideSnapshot := filepath.Join(outsideDir, "plan-rev-outside.md")
+	writeTestFile(t, outsideSnapshot, "# Outside plan\n")
+	outsidePayload := `{"hook_event_name":"Stop","permission_mode":"plan","last_assistant_message":"<proposed_plan>\n<!-- previous revision: ` + outsideSnapshot + ` -->\n# Plan with outside marker\n</proposed_plan>"}`
+	outside := runHook(outsidePayload, 0, "")
+	assert.Empty(t, outside)
+	assertFileContent(t, argsLog, "1\n")
+	assertFileContent(t, launchLog, "# Plan with outside marker")
+	assertFileContent(t, outsideSnapshot, "# Outside plan\n")
+
+	first := runHook(`{"hook_event_name":"Stop","permission_mode":"plan","stop_hook_active":false,"last_assistant_message":"<proposed_plan>\n# Plan\n- first\n</proposed_plan>"}`, exitCodeAnnotations, "revise first")
+	assert.Equal(t, "block", first["decision"])
+	assert.Contains(t, first["reason"], "Do NOT substitute any other plan-rev-*.md path")
+	firstSnapshots := planSnapshots(t, tmp)
+	require.Len(t, firstSnapshots, 1)
+	firstSnapshot := firstSnapshots[0]
+	assert.Contains(t, first["reason"], "<!-- previous revision: "+firstSnapshot+" -->")
+	assertFileContent(t, argsLog, "1\n")
+
+	secondPayload := `{"hook_event_name":"Stop","permission_mode":"plan","stop_hook_active":true,"last_assistant_message":"<proposed_plan>\n<!-- previous revision: ` + firstSnapshot + ` -->\n# Revised plan\n- second\n</proposed_plan>"}`
+	second := runHook(secondPayload, exitCodeAnnotations, "revise second")
+	assert.Equal(t, "block", second["decision"])
+	secondSnapshots := planSnapshots(t, tmp)
+	require.Len(t, secondSnapshots, 1)
+	secondSnapshot := secondSnapshots[0]
+	assert.NotEqual(t, firstSnapshot, secondSnapshot)
+	assert.NoFileExists(t, firstSnapshot)
+	assert.Contains(t, second["reason"], "<!-- previous revision: "+secondSnapshot+" -->")
+	assertFileContent(t, argsLog, "2\n")
+	assertFileContent(t, launchLog, "# Revised plan\n- second")
+	assertFileContent(t, oldLog, "# Plan\n- first")
+
+	failedPayload := `{"hook_event_name":"Stop","permission_mode":"plan","last_assistant_message":"<proposed_plan>\n<!-- previous revision: ` + secondSnapshot + ` -->\n# Failed attempt\n</proposed_plan>"}`
+	failed := runHook(failedPayload, 1, "")
+	assert.NotEmpty(t, failed["systemMessage"])
+	assert.FileExists(t, secondSnapshot)
+	assert.Equal(t, []string{secondSnapshot}, planSnapshots(t, tmp))
+
+	cleanPayload := `{"hook_event_name":"Stop","permission_mode":"plan","last_assistant_message":"<proposed_plan>\n<!-- previous revision: ` + secondSnapshot + ` -->\n# Final plan\n</proposed_plan>"}`
+	clean := runHook(cleanPayload, 0, "")
+	assert.Empty(t, clean)
+	assert.Empty(t, planSnapshots(t, tmp))
+	assertFileContent(t, argsLog, "2\n")
+	assertFileContent(t, launchLog, "# Final plan")
+	assertFileContent(t, oldLog, "# Revised plan\n- second")
+}
+
+func TestPlanningPluginHookWiring(t *testing.T) {
+	root := testRepoRoot(t)
+	claudeManifest := readRepoJSON[pluginManifest](t, root, "plugins", "revdiff-planning", ".claude-plugin", "plugin.json")
+	claudeHooks := readRepoJSON[hookManifest](t, root, "plugins", "revdiff-planning", "hooks", "hooks.json")
+	codexManifest := readRepoJSON[pluginManifest](t, root, "plugins", "revdiff-planning", ".codex-plugin", "plugin.json")
+	codexHooks := readRepoJSON[hookManifest](t, root, "plugins", "revdiff-planning", "hooks", "codex-hooks.json")
+
+	assert.Empty(t, claudeManifest.Hooks)
+	require.Len(t, claudeHooks.Hooks, 1)
+	require.Len(t, claudeHooks.Hooks["PreToolUse"], 1)
+	assert.Equal(t, "ExitPlanMode", claudeHooks.Hooks["PreToolUse"][0].Matcher)
+	require.Len(t, claudeHooks.Hooks["PreToolUse"][0].Hooks, 1)
+	assert.Equal(t, hookCommand{
+		Type:    "command",
+		Command: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/plan-review-hook.py"`,
+		Timeout: 345600,
+	}, claudeHooks.Hooks["PreToolUse"][0].Hooks[0])
+
+	assert.Equal(t, "./hooks/codex-hooks.json", codexManifest.Hooks)
+	require.Len(t, codexHooks.Hooks, 1)
+	require.Len(t, codexHooks.Hooks["Stop"], 1)
+	assert.Empty(t, codexHooks.Hooks["Stop"][0].Matcher)
+	require.Len(t, codexHooks.Hooks["Stop"][0].Hooks, 1)
+	assert.Equal(t, hookCommand{
+		Type:          "command",
+		Command:       `python3 "${PLUGIN_ROOT}/scripts/codex-plan-review-hook.py"`,
+		Timeout:       345600,
+		StatusMessage: "Reviewing proposed plan with RevDiff",
+	}, codexHooks.Hooks["Stop"][0].Hooks[0])
+	assert.NoFileExists(t, filepath.Join(root, "plugins", "revdiff-planning", "hooks", "claude-hooks.json"))
 }
 
 func TestOpenCodeCallersPreserveAnnotationExitCode(t *testing.T) {
@@ -663,6 +1011,13 @@ func readRepoFile(t *testing.T, root string, elems ...string) string {
 	return string(b)
 }
 
+func readRepoJSON[T any](t *testing.T, root string, elems ...string) T {
+	t.Helper()
+	var value T
+	require.NoError(t, json.Unmarshal([]byte(readRepoFile(t, root, elems...)), &value))
+	return value
+}
+
 func testFixtureScript(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "plugin-exit-code", name)) //nolint:gosec // tests read fixed fixture files
@@ -687,6 +1042,7 @@ func launcherBackends() []launcherBackend {
 		{name: "ghostty", command: "osascript", env: map[string]string{"TERM_PROGRAM": "ghostty"}},
 		{name: "iterm2", command: "osascript", env: map[string]string{"ITERM_SESSION_ID": "w0t0p0:ABC"}},
 		{name: "emacs", command: "emacsclient", env: map[string]string{"INSIDE_EMACS": "vterm"}},
+		{name: "agterm", command: "agtermctl", env: map[string]string{"AGTERM_SESSION_ID": "sess-1"}},
 	}
 }
 
@@ -743,4 +1099,11 @@ func planSnapshots(t *testing.T, dir string) []string {
 	matches, err := filepath.Glob(filepath.Join(dir, "plan-rev-*.md"))
 	require.NoError(t, err)
 	return matches
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	content, err := os.ReadFile(path) //nolint:gosec // path is a test-owned temp file
+	require.NoError(t, err)
+	assert.Equal(t, want, string(content))
 }

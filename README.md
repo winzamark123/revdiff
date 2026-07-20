@@ -111,6 +111,8 @@ Priority: agterm → tmux → Zellij → herdr → kitty → wezterm/Kaku → cm
 >
 > Terminals that use CLI tools instead of AppleScript (agterm, tmux, Zellij, herdr, kitty, wezterm, Kaku, cmux) are not affected.
 
+> **Disconnect-resilient tmux window mode:** set `REVDIFF_TMUX_WINDOW=1` in the launcher's environment to open revdiff in a persistent, server-owned tmux window instead of a client-owned `display-popup`. A dropped SSH or tmux client tears down a popup and kills the review, but a server-owned window survives the disconnect — reattach and the live review is still there. This is a launcher environment variable, not a revdiff flag.
+
 **Install:**
 
 ```bash
@@ -157,15 +159,26 @@ The plugin includes built-in reference documentation and can answer questions ab
 
 The plugin supports the full review loop: annotate → plan → fix → re-review until no more annotations remain. The bundled launcher treats exit code `10` as success-with-annotations and processes stdout normally.
 
-**Custom launchers:** both Claude plugins resolve their launcher script through a two-layer chain (user → bundled), so you can drop a custom launcher at `${CLAUDE_PLUGIN_DATA}/scripts/launch-revdiff.sh` without forking the plugin. There is no project-level (`.claude/...`) override layer by design — the planning hook fires automatically on every `ExitPlanMode`, and a repo-controlled executable layer would let an untrusted repo run arbitrary code on routine Claude actions. See `.claude-plugin/skills/revdiff/references/install.md` for the diff-review skill and [plugins/revdiff-planning/README.md](plugins/revdiff-planning/README.md) for the planning hook.
+**Custom launchers:** the Claude diff-review skill and the cross-runtime planning plugin resolve launchers through a two-layer chain (user → bundled). Claude uses `${CLAUDE_PLUGIN_DATA}/scripts/<launcher>`; the Codex planning hook uses `${PLUGIN_DATA}/scripts/launch-plan-review.sh`. There is no project-level executable override by design because these hooks auto-fire in any opened repository. See `.claude-plugin/skills/revdiff/references/install.md` for diff review and [plugins/revdiff-planning/README.md](plugins/revdiff-planning/README.md) for plan review.
 
 ### Plan Review Plugin
 
-A separate `revdiff-planning` plugin automatically opens revdiff when Claude exits plan mode, letting you annotate the plan before approving it. If you add annotations, Claude revises the plan and asks again — looping until you're satisfied. Exit code `10` means annotations were captured, not launcher failure.
+A separate `revdiff-planning` plugin automatically opens revdiff when Claude or Codex completes a plan, letting you annotate it before implementation. If you add annotations, the agent revises the full plan and presents it again — looping until you're satisfied. Exit code `10` means annotations were captured, not launcher failure.
+
+Claude Code:
 
 ```bash
 /plugin install revdiff-planning@revdiff
 ```
+
+Codex:
+
+```bash
+codex plugin marketplace add umputun/revdiff
+codex plugin add revdiff-planning@revdiff
+```
+
+Start a new Codex session and trust the hook through `/hooks`. Codex automatic review is opt-in and only fires for complete `<proposed_plan>` blocks in Plan mode; `/revdiff-plan` remains the manual fallback.
 
 This plugin is independent from the main `revdiff` plugin and does not conflict with other planning plugins (e.g., `planning` from `cc-thingz`).
 
@@ -225,7 +238,18 @@ revdiff ships with a [Codex CLI](https://github.com/openai/codex) plugin for int
 
 The plugin uses the same terminal overlay mechanism (tmux, Zellij, herdr, kitty, wezterm, etc.) as the Claude Code plugin.
 
-**Install:**
+**Install the automatic plan-review plugin:**
+
+```bash
+codex plugin marketplace add umputun/revdiff
+codex plugin add revdiff-planning@revdiff
+```
+
+Start a new session and trust the plugin hook through `/hooks`. The `Stop` hook runs only in Plan mode and first checks `last_assistant_message`; whenever that field has no complete `<proposed_plan>`, it reads the exact event transcript and selects the last assistant message for the matching `session_id` and `turn_id`, without depending on a provider-specific phase. A readable clarification turn is ignored. Missing or mismatched event data, dependencies, and launcher failures warn and fail open.
+
+When annotations are present, the hook asks Codex to return the complete revised plan with a snapshot marker on the first line inside `<proposed_plan>`. The next round opens a rolling compare (`<new> <old>`); reviewed snapshots are replaced, and a clean review removes the final snapshot.
+
+**Install the manual skills:**
 
 ```bash
 # clone the repo first
@@ -240,13 +264,13 @@ cp -r plugins/codex/skills/revdiff-plan ~/.codex/skills/revdiff-plan
 **Requirements:**
 
 - `revdiff` binary on `PATH`
-- `jq` (required for `/revdiff-plan` session extraction)
+- `jq` (required only for manual `/revdiff-plan` session extraction)
 - One of the supported terminal multiplexers for overlay mode
 
 **Notes:**
 
 - Codex treats exit code `10` as success-with-annotations and keeps captured output
-- Codex has no hook system — plan review requires manually invoking `/revdiff-plan` after Codex generates a plan
+- Automatic review uses the opt-in `revdiff-planning` plugin; `/revdiff-plan` remains a manual fallback
 - Scripts are portable copies from the Claude Code plugin, not symlinks
 - Plugin source lives under `plugins/codex/` in the repository
 
@@ -657,6 +681,8 @@ Each history file contains:
 - Raw git diff for annotated files only
 
 History auto-save is always on and silent — errors are logged to stderr, never fail the process. No history is saved on discard quit (`Q`) or when there are no annotations. For `--stdin` mode, files are saved under `stdin/` subdirectory; for `--only` without git, the parent directory name is used instead of a repo name.
+
+The history file is also a crash-recovery save when the process is terminated by a signal — a SIGHUP from a dropped SSH or tmux client, or a SIGTERM. On a signal exit only the history file is written, never the `-o` output, because a signal is not the deliberate handoff that `q` and `O` perform. Recover the annotations the usual way — load the newest history file. A signal-delivered SIGTERM previously wrote the `-o` output; it no longer does.
 
 Override the history directory with `--history-dir`, `REVDIFF_HISTORY_DIR` env var, or `history-dir` in the config file.
 
