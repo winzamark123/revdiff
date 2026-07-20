@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,23 +24,67 @@ func fileEntries(paths ...string) []diff.FileEntry {
 }
 
 func TestFileTree_BuildEntries(t *testing.T) {
-	ft := NewFileTree(fileEntries("internal/handler.go", "internal/store.go", "main.go"))
+	ft := NewFileTree(fileEntries("internal/http/handler.go", "internal/store.go", "main.go"))
 
-	assert.Len(t, ft.entries, 5) // 2 dirs (./, internal/) + 3 files
-	assert.True(t, ft.entries[0].isDir)
-	assert.Equal(t, "./", ft.entries[0].name)
-	assert.Equal(t, "main.go", ft.entries[1].name)
-	assert.Equal(t, "main.go", ft.entries[1].path)
-	assert.True(t, ft.entries[2].isDir)
-	assert.Equal(t, "internal/", ft.entries[2].name)
-	assert.Equal(t, "handler.go", ft.entries[3].name)
-	assert.Equal(t, "internal/handler.go", ft.entries[3].path)
-	assert.Equal(t, "store.go", ft.entries[4].name)
+	require.Len(t, ft.entries, 5)
+	assert.Equal(t, treeEntry{name: "main.go", path: "main.go", depth: 0}, ft.entries[0])
+	assert.Equal(t, treeEntry{name: "internal", path: "internal", isDir: true, depth: 0}, ft.entries[1])
+	assert.Equal(t, treeEntry{name: "store.go", path: "internal/store.go", depth: 1}, ft.entries[2])
+	assert.Equal(t, treeEntry{name: "http", path: "internal/http", isDir: true, depth: 1}, ft.entries[3])
+	assert.Equal(t, treeEntry{name: "handler.go", path: "internal/http/handler.go", depth: 2}, ft.entries[4])
 }
 
 func TestFileTree_BuildEntriesEmpty(t *testing.T) {
 	ft := NewFileTree(nil)
 	assert.Empty(t, ft.entries)
+}
+
+func TestFileTree_ToggleSelectedDirectory(t *testing.T) {
+	ft := NewFileTree(fileEntries("app/model.go", "app/ui/view.go", "docs/usage.md"))
+	require.True(t, ft.SelectByVisibleRow(0))
+	require.True(t, ft.entries[ft.cursor].isDir)
+	require.Equal(t, "app", ft.entries[ft.cursor].path)
+
+	assert.True(t, ft.ToggleSelectedDirectory())
+	assert.Equal(t, []treeEntry{
+		{name: "app", path: "app", isDir: true, depth: 0},
+		{name: "docs", path: "docs", isDir: true, depth: 0},
+		{name: "usage.md", path: "docs/usage.md", depth: 1},
+	}, ft.entries)
+	assert.Empty(t, ft.SelectedFile())
+	res := style.PlainResolver()
+	assert.Contains(t, ansi.Strip(ft.Render(FileTreeRender{Width: 30, Height: 10, Resolver: res, Renderer: style.NewRenderer(res)})), "▸ app/")
+
+	assert.True(t, ft.ToggleSelectedDirectory())
+	assert.Len(t, ft.entries, 6)
+	assert.Equal(t, "app", ft.entries[ft.cursor].path)
+	ft.Move(MotionDown)
+	assert.Equal(t, "app/model.go", ft.SelectedFile())
+	assert.False(t, ft.ToggleSelectedDirectory(), "a file selection should not toggle")
+}
+
+func TestFileTree_SelectByPathExpandsAncestors(t *testing.T) {
+	ft := NewFileTree(fileEntries("app/ui/view.go", "docs/usage.md"))
+	require.True(t, ft.SelectByVisibleRow(0))
+	require.True(t, ft.ToggleSelectedDirectory())
+	require.Len(t, ft.entries, 3)
+
+	assert.True(t, ft.SelectByPath("app/ui/view.go"))
+	assert.Equal(t, "app/ui/view.go", ft.SelectedFile())
+	assert.False(t, ft.collapsedDirs["app"])
+	assert.Len(t, ft.entries, 5)
+}
+
+func TestFileTree_CollapseStateSurvivesRebuild(t *testing.T) {
+	ft := NewFileTree(fileEntries("app/a.go", "docs/readme.md"))
+	require.True(t, ft.SelectByVisibleRow(0))
+	require.True(t, ft.ToggleSelectedDirectory())
+
+	ft.Rebuild(fileEntries("app/a.go", "app/b.go", "docs/readme.md"))
+
+	assert.True(t, ft.collapsedDirs["app"])
+	assert.Equal(t, "docs/readme.md", ft.SelectedFile())
+	assert.Len(t, ft.entries, 3)
 }
 
 func TestFileTree_SelectedFile(t *testing.T) {
@@ -249,7 +294,7 @@ func TestFileTree_EnableUnreviewedFilterWithoutAnchorResetsViewport(t *testing.T
 
 	assert.Equal(t, "a.go", ft.SelectedFile())
 	assert.Zero(t, ft.offset, "fallback selection should reset the viewport")
-	assert.Equal(t, "./", ft.entries[ft.offset].name, "the root header should remain visible")
+	assert.Equal(t, "a.go", ft.entries[ft.offset].name, "the first root file should remain visible")
 }
 
 func TestFileTree_UnreviewedAndAnnotatedFiltersAreExclusive(t *testing.T) {
@@ -323,23 +368,22 @@ func TestFileTree_SetFilesNewList(t *testing.T) {
 }
 
 func TestFileTree_DirectoryGrouping(t *testing.T) {
-	ft := NewFileTree(fileEntries("cmd/main.go", "internal/handler.go", "internal/store.go"))
+	ft := NewFileTree(fileEntries("cmd/main.go", "internal/http/handler.go", "internal/store.go"))
 
-	assert.Len(t, ft.entries, 5)
-	assert.Equal(t, "cmd/", ft.entries[0].name)
+	require.Len(t, ft.entries, 6)
+	assert.Equal(t, "cmd", ft.entries[0].name)
 	assert.True(t, ft.entries[0].isDir)
 	assert.Equal(t, "main.go", ft.entries[1].name)
-	assert.Equal(t, "internal/", ft.entries[2].name)
+	assert.Equal(t, "internal", ft.entries[2].name)
 	assert.True(t, ft.entries[2].isDir)
-	assert.Equal(t, "handler.go", ft.entries[3].name)
-	assert.Equal(t, "store.go", ft.entries[4].name)
+	assert.Equal(t, "store.go", ft.entries[3].name)
+	assert.Equal(t, "http", ft.entries[4].name)
+	assert.Equal(t, "handler.go", ft.entries[5].name)
 }
 
 func TestFileTree_FileIndices(t *testing.T) {
 	ft := NewFileTree(fileEntries("a.go", "b.go"))
-	indices := ft.fileIndices()
-	// dir at 0, files at 1 and 2
-	assert.Equal(t, []int{1, 2}, indices)
+	assert.Equal(t, []int{0, 1}, ft.fileIndices())
 }
 
 func TestFileTree_RefreshFilter(t *testing.T) {
@@ -450,10 +494,12 @@ func TestFileTree_PageUp(t *testing.T) {
 	assert.Equal(t, "internal/e.go", ft.SelectedFile(), "pageUp(3) should move back 3 files")
 
 	ft.Move(MotionPageUp, 100)
-	assert.Equal(t, "cmd/flags.go", ft.SelectedFile(), "pageUp past start should clamp at first file")
+	assert.Empty(t, ft.SelectedFile(), "pageUp past start should land on the first tree entry")
+	assert.Equal(t, "cmd", ft.entries[ft.cursor].path)
 
 	ft.Move(MotionPageUp, 1)
-	assert.Equal(t, "cmd/flags.go", ft.SelectedFile(), "pageUp at start should stay at first file")
+	assert.Empty(t, ft.SelectedFile(), "pageUp at start should stay on the first tree entry")
+	assert.Equal(t, "cmd", ft.entries[ft.cursor].path)
 }
 
 func TestFileTree_PageDownAccountsForDirHeaders(t *testing.T) {
@@ -476,11 +522,13 @@ func TestFileTree_MoveToFirstLast(t *testing.T) {
 	assert.Equal(t, "internal/c.go", ft.SelectedFile(), "MotionLast should select last file")
 
 	ft.Move(MotionFirst)
-	assert.Equal(t, "cmd/main.go", ft.SelectedFile(), "MotionFirst should select first file")
+	assert.Empty(t, ft.SelectedFile(), "MotionFirst should select the first directory")
+	assert.Equal(t, "cmd", ft.entries[ft.cursor].path)
 
 	// idempotent
 	ft.Move(MotionFirst)
-	assert.Equal(t, "cmd/main.go", ft.SelectedFile())
+	assert.Empty(t, ft.SelectedFile())
+	assert.Equal(t, "cmd", ft.entries[ft.cursor].path)
 
 	ft.Move(MotionLast)
 	ft.Move(MotionLast)
@@ -488,29 +536,19 @@ func TestFileTree_MoveToFirstLast(t *testing.T) {
 }
 
 func TestFileTree_RenderIndentation(t *testing.T) {
-	ft := NewFileTree(fileEntries("cmd/main.go", "internal/handler.go", "internal/store.go"))
+	ft := NewFileTree(fileEntries("cmd/main.go", "internal/http/handler.go", "internal/store.go"))
 	res := style.NewResolver(style.Colors{Accent: "#5f87ff", Border: "#585858", Normal: "#d0d0d0", Muted: "#6c6c6c", SelectedFg: "#ffffaf", SelectedBg: "#303030", Annotation: "#ffd700", CursorBg: "#3a3a3a", AddFg: "#87d787", AddBg: "#022800", RemoveFg: "#ff8787", RemoveBg: "#3D0100"})
 	rnd := style.NewRenderer(res)
 
-	for _, e := range ft.entries {
-		if e.isDir {
-			assert.Equal(t, 0, e.depth, "directory %q should have depth 0", e.name)
-		} else {
-			assert.Equal(t, 1, e.depth, "file %q should have depth 1", e.name)
-		}
-	}
-
 	result := ft.Render(FileTreeRender{Width: 40, Height: 100, Resolver: res, Renderer: rnd})
-	lines := strings.Split(result, "\n")
-	assert.GreaterOrEqual(t, len(lines), 5, "expected at least 5 lines (2 dirs + 3 files)")
+	plain := ansi.Strip(result)
 
-	for _, e := range ft.entries {
-		if e.isDir {
-			assert.Contains(t, result, " "+e.name, "directory %q should appear with single leading space", e.name)
-		} else {
-			assert.Contains(t, result, "  "+e.name, "file %q should be indented under its directory", e.name)
-		}
-	}
+	assert.Contains(t, plain, "▾ cmd/")
+	assert.Contains(t, plain, "    main.go")
+	assert.Contains(t, plain, "▾ internal/")
+	assert.Contains(t, plain, "    store.go")
+	assert.Contains(t, plain, "  ▾ http/")
+	assert.Contains(t, plain, "      handler.go")
 }
 
 func TestFileTree_EnsureVisible(t *testing.T) {
@@ -555,8 +593,8 @@ func TestFileTree_RenderViewport(t *testing.T) {
 func TestFileTree_EnsureVisibleResetsOffsetWhenTreeFitsViewport(t *testing.T) {
 	ft := NewFileTree(fileEntries("a.go", "b.go", "c.go"))
 
-	ft.offset = 3
-	ft.cursor = 3 // cursor at c.go
+	ft.offset = 2
+	ft.cursor = 2 // cursor at c.go
 
 	ft.EnsureVisible(20)
 	assert.Equal(t, 0, ft.offset, "offset should reset to 0 when all entries fit in viewport")
@@ -586,28 +624,26 @@ func TestFileTree_SelectByPath(t *testing.T) {
 func TestFileTree_SelectByVisibleRow(t *testing.T) {
 	t.Run("first row at offset zero selects first entry", func(t *testing.T) {
 		ft := NewFileTree(fileEntries("a.go", "b.go"))
-		// entries: ["./", "a.go", "b.go"]
 		ok := ft.SelectByVisibleRow(0)
 		assert.True(t, ok)
 		assert.Equal(t, 0, ft.cursor)
+		assert.Equal(t, "a.go", ft.SelectedFile())
 	})
 
 	t.Run("row within visible range selects matching entry", func(t *testing.T) {
 		ft := NewFileTree(fileEntries("a.go", "b.go", "c.go"))
-		// entries: ["./", "a.go", "b.go", "c.go"], offset=0
 		ok := ft.SelectByVisibleRow(2)
 		assert.True(t, ok)
-		assert.Equal(t, 2, ft.cursor) // "b.go"
-		assert.Equal(t, "b.go", ft.SelectedFile())
+		assert.Equal(t, 2, ft.cursor)
+		assert.Equal(t, "c.go", ft.SelectedFile())
 	})
 
 	t.Run("row with non-zero offset adds offset", func(t *testing.T) {
 		ft := NewFileTree(fileEntries("a.go", "b.go", "c.go", "d.go", "e.go"))
-		// entries: ["./", "a.go", "b.go", "c.go", "d.go", "e.go"]
-		ft.offset = 3
+		ft.offset = 2
 		ok := ft.SelectByVisibleRow(1)
 		assert.True(t, ok)
-		assert.Equal(t, 4, ft.cursor) // offset(3) + row(1) = "d.go"
+		assert.Equal(t, 3, ft.cursor)
 		assert.Equal(t, "d.go", ft.SelectedFile())
 	})
 
@@ -657,14 +693,14 @@ func TestFileTree_SelectByVisibleRow(t *testing.T) {
 }
 
 func TestFileTree_RenderTruncatesLongDirNames(t *testing.T) {
-	ft := NewFileTree(fileEntries(".claude-plugin/skills/revdiff/references/config.md"))
+	ft := NewFileTree(fileEntries("directory-name-that-is-too-long/config.md"))
 	res := style.NewResolver(style.Colors{Accent: "#5f87ff", Border: "#585858", Normal: "#d0d0d0", Muted: "#6c6c6c", SelectedFg: "#ffffaf", SelectedBg: "#303030", Annotation: "#ffd700", AddFg: "#87d787", AddBg: "#022800", RemoveFg: "#ff8787", RemoveBg: "#3D0100"})
 	rnd := style.NewRenderer(res)
 
-	result := ft.Render(FileTreeRender{Width: 30, Height: 10, Resolver: res, Renderer: rnd})
-	assert.Contains(t, result, "…", "long dir name should be truncated with ellipsis")
-	assert.Contains(t, result, "references/", "truncated dir should show trailing path")
-	assert.NotContains(t, result, ".claude-plugin/skills/revdiff/references/", "full dir name should not appear")
+	result := ansi.Strip(ft.Render(FileTreeRender{Width: 20, Height: 10, Resolver: res, Renderer: rnd}))
+	assert.Contains(t, result, "…", "long directory segment should be truncated with ellipsis")
+	assert.Contains(t, result, "too-long/", "truncation should preserve the end of the directory name")
+	assert.NotContains(t, result, "directory-name-that-is-too-long/")
 }
 
 func TestFileTree_RenderTruncatesLongFileNames(t *testing.T) {
@@ -685,6 +721,16 @@ func TestFileTree_RenderTruncatesLongFileNames(t *testing.T) {
 	require.NotEmpty(t, fileLine, "should find the .md file entry")
 	assert.Contains(t, fileLine, "…", "long filename should be truncated with ellipsis")
 	assert.LessOrEqual(t, lipgloss.Width(fileLine), 30, "file entry should not exceed pane width")
+}
+
+func TestFileTree_RenderDeepHierarchyDoesNotWrap(t *testing.T) {
+	ft := NewFileTree(fileEntries("a/b/c/d/e/f/long-file-name.go"))
+	res := style.PlainResolver()
+	rendered := ansi.Strip(ft.Render(FileTreeRender{Width: 12, Height: 20, Resolver: res, Renderer: style.NewRenderer(res)}))
+
+	for line := range strings.SplitSeq(rendered, "\n") {
+		assert.LessOrEqual(t, lipgloss.Width(line), 10, "tree content must stay within the pane width")
+	}
 }
 
 func TestFileTree_RenderViewportCursorAlwaysVisible(t *testing.T) {
@@ -792,13 +838,13 @@ func TestFileTree_RenderReviewedCheckmark(t *testing.T) {
 
 func TestFileTree_RenderFileEntryRestoresNormalForegroundAfterColoredPrefix(t *testing.T) {
 	ft := NewFileTree([]diff.FileEntry{{Path: "a.go", Status: diff.FileAdded}})
-	ft.cursor = 0 // keep the file unselected so the inline ANSI path is used
+	ft.cursor = 1 // keep the file unselected so the inline ANSI path is used
 	ft.SetReviewed("a.go", "fp-a")
 
 	res := style.NewResolver(style.Colors{Normal: "#d0d0d0", AddFg: "#87d787", Muted: "#6c6c6c"})
 	rnd := style.NewRenderer(res)
 
-	line := ft.renderFileEntry(ft.entries[1], 1, 40, renderCtx{annotatedFiles: nil, res: res, rnd: rnd})
+	line := ft.renderFileEntry(ft.entries[0], 0, 40, renderCtx{annotatedFiles: nil, res: res, rnd: rnd})
 
 	assert.Contains(t, line, "\033[38;2;135;215;135m✓\033[38;2;208;208;208m ")
 	assert.Contains(t, line, "\033[38;2;135;215;135mA\033[38;2;208;208;208m a.go")
@@ -812,7 +858,7 @@ func TestFileTree_TruncateDirName(t *testing.T) {
 	}{
 		{name: "no truncation needed", input: "short", maxWidth: 10, expected: "short"},
 		{name: "exact fit", input: "exact", maxWidth: 5, expected: "exact"},
-		{name: "zero width", input: "anything", maxWidth: 0, expected: "anything"},
+		{name: "zero width", input: "anything", maxWidth: 0, expected: ""},
 		{name: "ascii truncation", input: "very/long/path/name", maxWidth: 10, expected: "…path/name"},
 		{name: "cjk truncation", input: "目录/很长的路径/名称", maxWidth: 6, expected: "…/名称"},
 		{name: "emoji truncation", input: "📁folder/📂sub/file", maxWidth: 10, expected: "…sub/file"},

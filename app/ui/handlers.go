@@ -181,6 +181,9 @@ func (m Model) handleEnterKey() (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		if m.toggleSelectedTreeDirectory() {
+			return m, nil
+		}
 		if m.file.name != "" {
 			m.layout.focus = paneDiff
 		}
@@ -243,7 +246,12 @@ func (m Model) handleUnreviewedFilterToggle() (tea.Model, tea.Cmd) {
 
 // handleMarkReviewed toggles the reviewed state of the focused file.
 // tree focus uses the selected row; diff/TOC focus uses the displayed file.
+// On a tree directory, the same key collapses or expands that directory.
 func (m Model) handleMarkReviewed() (tea.Model, tea.Cmd) {
+	if m.toggleSelectedTreeDirectory() {
+		return m, nil
+	}
+
 	file := m.file.name
 	if m.layout.focus == paneTree && m.file.mdTOC == nil {
 		file = m.tree.SelectedFile()
@@ -280,6 +288,16 @@ func (m Model) handleMarkReviewed() (tea.Model, tea.Cmd) {
 	m.reviewed.pending[file] = seq
 	entry := diff.FileEntry{Path: file, OldPath: m.tree.OldPath(file), Status: m.tree.FileStatus(file)}
 	return m, m.loadReviewFingerprint(entry, seq)
+}
+
+func (m *Model) toggleSelectedTreeDirectory() bool {
+	if m.layout.focus != paneTree || m.file.mdTOC != nil || !m.tree.ToggleSelectedDirectory() {
+		return false
+	}
+	m.pendingAnnotJump = nil
+	m.nav.pendingHunkJump = nil
+	m.tree.EnsureVisible(m.treePageSize())
+	return true
 }
 
 // handleFileOrSearchNav handles next/prev item navigation: navigates search matches when a search
