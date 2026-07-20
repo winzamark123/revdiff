@@ -14,25 +14,34 @@ import (
 	"github.com/umputun/revdiff/app/ui/style"
 )
 
-// FileTree manages the list of changed files grouped by directory.
+// FileTree manages changed files as a hierarchical, collapsible tree.
 type FileTree struct {
-	entries      []treeEntry                // flat list of directories and files for display
-	cursor       int                        // currently highlighted entry index
-	offset       int                        // first visible entry index for viewport scrolling
-	allFiles     []string                   // original full file paths
-	filter       bool                       // when true, show only annotated files
-	unreviewed   bool                       // when true, show only files not marked reviewed
-	reviewed     map[string]string          // semantic diff fingerprint for files marked reviewed
-	fileStatuses map[string]diff.FileStatus // file change status from git, empty for non-git
-	oldPaths     map[string]string          // rename origin keyed by new path, empty for non-renames
+	entries        []treeEntry                // visible directories and files in tree order
+	cursor         int                        // currently highlighted entry index
+	offset         int                        // first visible entry index for viewport scrolling
+	allFiles       []string                   // original full file paths
+	displayedFiles []string                   // files represented by the current filter
+	collapsedDirs  map[string]bool            // collapsed directory paths
+	filter         bool                       // when true, show only annotated files
+	unreviewed     bool                       // when true, show only files not marked reviewed
+	reviewed       map[string]string          // semantic diff fingerprint for files marked reviewed
+	fileStatuses   map[string]diff.FileStatus // file change status from git, empty for non-git
+	oldPaths       map[string]string          // rename origin keyed by new path, empty for non-renames
 }
 
-// treeEntry represents a single line in the file tree display.
+// treeEntry represents a single visible line in the file tree.
 type treeEntry struct {
-	name  string // display name (directory name or file basename)
-	path  string // full file path (empty for directory entries)
+	name  string // path segment for directories, basename for files
+	path  string // full file path or normalized directory path
 	isDir bool
 	depth int // indentation level
+}
+
+type treeNode struct {
+	name  string
+	path  string
+	files []treeEntry
+	dirs  map[string]*treeNode
 }
 
 // renderCtx holds rendering context for a file tree entry,
@@ -48,12 +57,13 @@ type renderCtx struct {
 func NewFileTree(entries []diff.FileEntry) *FileTree {
 	paths := diff.FileEntryPaths(entries)
 	ft := &FileTree{
-		allFiles:     paths,
-		reviewed:     make(map[string]string),
-		fileStatuses: make(map[string]diff.FileStatus),
-		oldPaths:     make(map[string]string),
+		allFiles:      paths,
+		collapsedDirs: make(map[string]bool),
+		reviewed:      make(map[string]string),
+		fileStatuses:  make(map[string]diff.FileStatus),
+		oldPaths:      make(map[string]string),
 	}
-	ft.entries = ft.buildEntries(paths)
+	ft.setDisplayedFiles(paths)
 
 	// store file statuses and rename origins from entries
 	for _, e := range entries {
@@ -78,7 +88,7 @@ func NewFileTree(entries []diff.FileEntry) *FileTree {
 // SelectedFile returns the full path of the currently selected file,
 // or empty string if a directory is selected or entries are empty.
 func (ft *FileTree) SelectedFile() string {
-	if ft.cursor < 0 || ft.cursor >= len(ft.entries) {
+	if ft.cursor < 0 || ft.cursor >= len(ft.entries) || ft.entries[ft.cursor].isDir {
 		return ""
 	}
 	return ft.entries[ft.cursor].path
@@ -187,11 +197,41 @@ func (ft *FileTree) StepFile(dir Direction) {
 }
 
 // SelectByPath sets the cursor to the file entry matching the given path.
+// Collapsed ancestors are expanded so programmatic jumps always reveal their target.
 // returns true if the file was found and cursor moved, false otherwise.
 func (ft *FileTree) SelectByPath(path string) bool {
-	for i, e := range ft.entries {
-		if !e.isDir && e.path == path {
+	if ft.selectFile(path) {
+		return true
+	}
+	if !slices.Contains(ft.displayedFiles, path) {
+		return false
+	}
+	for _, dir := range ft.directoryPaths(path) {
+		delete(ft.collapsedDirs, dir)
+	}
+	ft.entries = ft.buildEntries(ft.displayedFiles)
+	return ft.selectFile(path)
+}
+
+// ToggleSelectedDirectory collapses or expands the selected directory.
+// returns false when the selected entry is a file or the tree is empty.
+func (ft *FileTree) ToggleSelectedDirectory() bool {
+	if ft.cursor < 0 || ft.cursor >= len(ft.entries) || !ft.entries[ft.cursor].isDir {
+		return false
+	}
+
+	selected := ft.entries[ft.cursor]
+	visibleRow := ft.visibleRow()
+	if ft.collapsedDirs[selected.path] {
+		delete(ft.collapsedDirs, selected.path)
+	} else {
+		ft.collapsedDirs[selected.path] = true
+	}
+	ft.entries = ft.buildEntries(ft.displayedFiles)
+	for i, entry := range ft.entries {
+		if entry.isDir && entry.path == selected.path {
 			ft.cursor = i
+			ft.offset = max(i-max(visibleRow, 0), 0)
 			return true
 		}
 	}
@@ -266,7 +306,8 @@ func (ft *FileTree) Rebuild(entries []diff.FileEntry) {
 
 	// rebuild entries list with all files; filter state is preserved but can't be applied
 	// without annotated map here — refreshFilter will be called separately if needed
-	ft.entries = ft.buildEntries(paths)
+	ft.pruneCollapsedDirs(paths)
+	ft.setDisplayedFiles(paths)
 
 	// This temporary unfiltered anchor is load-bearing: it carries the visible row into RefreshUnreviewedFilter.
 	ft.selectAfterRebuild(selected, "", visibleRow)
@@ -282,9 +323,9 @@ func (ft *FileTree) ToggleFilter(annotatedFiles map[string]bool) {
 			return
 		}
 		ft.unreviewed = false
-		ft.entries = ft.buildEntries(filtered)
+		ft.setDisplayedFiles(filtered)
 	} else {
-		ft.entries = ft.buildEntries(ft.allFiles)
+		ft.setDisplayedFiles(ft.allFiles)
 	}
 
 	// position cursor on first file
@@ -306,11 +347,11 @@ func (ft *FileTree) ToggleUnreviewedFilter() {
 	ft.unreviewed = !ft.unreviewed
 	if ft.unreviewed {
 		ft.filter = false
-		ft.entries = ft.buildEntries(ft.unreviewedFiles())
+		ft.setDisplayedFiles(ft.unreviewedFiles())
 		ft.selectAfterRebuild(previous, "", visibleRow)
 		return
 	}
-	ft.entries = ft.buildEntries(ft.allFiles)
+	ft.setDisplayedFiles(ft.allFiles)
 	ft.selectAfterRebuild("", "", 0)
 }
 
@@ -324,7 +365,7 @@ func (ft *FileTree) RefreshUnreviewedFilter() {
 	previous := ft.SelectedFile()
 	next := ft.nextUnreviewedAfterCursor()
 	visibleRow := ft.visibleRow()
-	ft.entries = ft.buildEntries(ft.unreviewedFiles())
+	ft.setDisplayedFiles(ft.unreviewedFiles())
 	ft.selectAfterRebuild(previous, next, visibleRow)
 }
 
@@ -341,9 +382,9 @@ func (ft *FileTree) RefreshFilter(annotatedFiles map[string]bool) {
 	if len(filtered) == 0 {
 		// no annotated files left, switch back to all files
 		ft.filter = false
-		ft.entries = ft.buildEntries(ft.allFiles)
+		ft.setDisplayedFiles(ft.allFiles)
 	} else {
-		ft.entries = ft.buildEntries(filtered)
+		ft.setDisplayedFiles(filtered)
 	}
 
 	// try to keep cursor on same file, otherwise position on first file
@@ -430,7 +471,7 @@ func (ft *FileTree) Render(r FileTreeRender) string {
 		var line string
 
 		if e.isDir {
-			line = r.Resolver.Style(style.StyleKeyDirEntry).Render(" " + ft.truncateDirName(e.name, r.Width-3))
+			line = ft.renderDirectoryEntry(e, idx, r.Width, r.Resolver)
 		} else {
 			line = ft.renderFileEntry(e, idx, r.Width, rc)
 		}
@@ -471,7 +512,7 @@ func (ft *FileTree) selectAfterRebuild(previous, preferred string, visibleRow in
 }
 
 // nextUnreviewedAfterCursor follows the rendered tree order, which can differ
-// from the renderer-provided allFiles order after directory grouping.
+// from the renderer-provided allFiles order after hierarchical sorting.
 func (ft *FileTree) nextUnreviewedAfterCursor() string {
 	start := min(max(ft.cursor+1, 0), len(ft.entries))
 	for _, entry := range ft.entries[start:] {
@@ -482,48 +523,132 @@ func (ft *FileTree) nextUnreviewedAfterCursor() string {
 	return ""
 }
 
-// buildEntries groups files by directory and creates a flat entry list.
+// buildEntries creates the visible projection of the hierarchical file tree.
 func (ft *FileTree) buildEntries(files []string) []treeEntry {
 	if len(files) == 0 {
 		return nil
 	}
 
-	// group files by directory
-	dirFiles := make(map[string][]string)
-	var dirs []string
-	for _, f := range files {
-		dir := filepath.Dir(f)
-		if _, ok := dirFiles[dir]; !ok {
-			dirs = append(dirs, dir)
+	root := &treeNode{dirs: make(map[string]*treeNode)}
+	for _, file := range files {
+		parts := ft.treePathParts(file)
+		if len(parts) == 0 {
+			continue
 		}
-		dirFiles[dir] = append(dirFiles[dir], f)
+		node := root
+		for i, name := range parts[:len(parts)-1] {
+			dirPath := strings.Join(parts[:i+1], "/")
+			if node.dirs[name] == nil {
+				node.dirs[name] = &treeNode{name: name, path: dirPath, dirs: make(map[string]*treeNode)}
+			}
+			node = node.dirs[name]
+		}
+		node.files = append(node.files, treeEntry{
+			name:  parts[len(parts)-1],
+			path:  file,
+			depth: len(parts) - 1,
+		})
 	}
-	sort.Strings(dirs)
 
-	entries := make([]treeEntry, 0, len(dirs)+len(files))
-	for _, dir := range dirs {
-		// add directory entry
-		dirName := dir
-		if dirName == "." {
-			dirName = "./"
-		} else {
-			dirName = dir + "/"
+	entries := make([]treeEntry, 0, len(files))
+	var appendNode func(node *treeNode, depth int)
+	appendNode = func(node *treeNode, depth int) {
+		sort.Slice(node.files, func(i, j int) bool {
+			if node.files[i].name == node.files[j].name {
+				return node.files[i].path < node.files[j].path
+			}
+			return node.files[i].name < node.files[j].name
+		})
+		entries = append(entries, node.files...)
+
+		dirNames := make([]string, 0, len(node.dirs))
+		for name := range node.dirs {
+			dirNames = append(dirNames, name)
 		}
-		entries = append(entries, treeEntry{name: dirName, isDir: true, depth: 0})
-
-		// add file entries under this directory, sorted
-		dirFileList := dirFiles[dir]
-		sort.Strings(dirFileList)
-		for _, f := range dirFileList {
-			entries = append(entries, treeEntry{
-				name:  filepath.Base(f),
-				path:  f,
-				isDir: false,
-				depth: 1,
-			})
+		sort.Strings(dirNames)
+		for _, name := range dirNames {
+			dir := node.dirs[name]
+			entries = append(entries, treeEntry{name: dir.name, path: dir.path, isDir: true, depth: depth})
+			if !ft.collapsedDirs[dir.path] {
+				appendNode(dir, depth+1)
+			}
 		}
 	}
+	appendNode(root, 0)
 	return entries
+}
+
+func (ft *FileTree) setDisplayedFiles(files []string) {
+	ft.displayedFiles = slices.Clone(files)
+	ft.entries = ft.buildEntries(files)
+	if len(ft.entries) == 0 {
+		ft.cursor = 0
+		ft.offset = 0
+	}
+}
+
+func (ft *FileTree) selectFile(path string) bool {
+	for i, entry := range ft.entries {
+		if !entry.isDir && entry.path == path {
+			ft.cursor = i
+			return true
+		}
+	}
+	return false
+}
+
+func (ft *FileTree) pruneCollapsedDirs(files []string) {
+	present := make(map[string]bool)
+	for _, file := range files {
+		for _, dir := range ft.directoryPaths(file) {
+			present[dir] = true
+		}
+	}
+	for dir := range ft.collapsedDirs {
+		if !present[dir] {
+			delete(ft.collapsedDirs, dir)
+		}
+	}
+}
+
+func (ft *FileTree) treePathParts(file string) []string {
+	normalized := filepath.ToSlash(filepath.Clean(file))
+	parts := strings.Split(normalized, "/")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" && part != "." {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+func (ft *FileTree) directoryPaths(file string) []string {
+	parts := ft.treePathParts(file)
+	if len(parts) < 2 {
+		return nil
+	}
+	result := make([]string, 0, len(parts)-1)
+	for i := range parts[:len(parts)-1] {
+		result = append(result, strings.Join(parts[:i+1], "/"))
+	}
+	return result
+}
+
+func (ft *FileTree) renderDirectoryEntry(e treeEntry, idx, width int, res Resolver) string {
+	indicator := "▾ "
+	if ft.collapsedDirs[e.path] {
+		indicator = "▸ "
+	}
+	maxWidth := max(width-2, 0)
+	indentWidth := min(e.depth*2, max(maxWidth-runewidth.StringWidth(indicator)-1, 0))
+	prefix := strings.Repeat(" ", indentWidth) + indicator
+	nameWidth := max(maxWidth-runewidth.StringWidth(prefix), 0)
+	line := prefix + ft.truncateDirName(e.name+"/", nameWidth)
+	if idx == ft.cursor {
+		return res.Style(style.StyleKeyFileSelected).Width(maxWidth).Render(line)
+	}
+	return res.Style(style.StyleKeyDirEntry).Render(line)
 }
 
 // renderFileEntry renders a single file entry in the tree, truncating long names to prevent wrapping.
@@ -560,9 +685,11 @@ func (ft *FileTree) renderFileEntry(e treeEntry, idx, width int, rc renderCtx) s
 		marker = rc.rnd.FileAnnotationMark()
 	}
 
-	prefix := reviewMark + statusMark
+	maxWidth := max(width-2, 0)
+	fixedWidth := lipgloss.Width(reviewMark + statusMark + marker)
+	indentWidth := min(e.depth*2, max(maxWidth-fixedWidth-2, 0))
+	prefix := strings.Repeat(" ", indentWidth) + reviewMark + statusMark
 	name := prefix + e.name + marker
-	maxWidth := width - 2
 
 	// truncate from the left of the filename when it exceeds pane width
 	if lipgloss.Width(name) > maxWidth && maxWidth > 4 {
@@ -624,7 +751,10 @@ func (ft *FileTree) fileIndices() []int {
 // truncateDirName trims a directory name from the left to fit maxWidth display cells,
 // prepending an ellipsis when truncated.
 func (ft *FileTree) truncateDirName(name string, maxWidth int) string {
-	if maxWidth <= 0 || runewidth.StringWidth(name) <= maxWidth {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(name) <= maxWidth {
 		return name
 	}
 	runes := []rune(name)
@@ -641,71 +771,43 @@ func (ft *FileTree) truncateDirName(name string, maxWidth int) string {
 	return "…" + string(runes[start:])
 }
 
-// moveDown moves cursor to the next file entry (skips directories).
+// moveDown moves cursor to the next visible tree entry.
 func (ft *FileTree) moveDown() {
-	for i := ft.cursor + 1; i < len(ft.entries); i++ {
-		if !ft.entries[i].isDir {
-			ft.cursor = i
-			return
-		}
+	if ft.cursor < len(ft.entries)-1 {
+		ft.cursor++
 	}
 }
 
-// moveUp moves cursor to the previous file entry (skips directories).
+// moveUp moves cursor to the previous visible tree entry.
 func (ft *FileTree) moveUp() {
-	for i := ft.cursor - 1; i >= 0; i-- {
-		if !ft.entries[i].isDir {
-			ft.cursor = i
-			return
-		}
+	if ft.cursor > 0 {
+		ft.cursor--
 	}
 }
 
-// pageDown moves cursor down by approximately n visual rows,
-// accounting for directory header rows that occupy rendered space.
+// pageDown moves cursor down by n visible rows.
 func (ft *FileTree) pageDown(n int) {
-	rowsMoved := 0
-	for rowsMoved < n {
-		prev := ft.cursor
-		ft.moveDown()
-		if ft.cursor == prev {
-			break
-		}
-		rowsMoved += ft.cursor - prev // counts skipped directory entries too
+	if len(ft.entries) > 0 {
+		ft.cursor = min(ft.cursor+max(n, 1), len(ft.entries)-1)
 	}
 }
 
-// pageUp moves cursor up by approximately n visual rows,
-// accounting for directory header rows that occupy rendered space.
+// pageUp moves cursor up by n visible rows.
 func (ft *FileTree) pageUp(n int) {
-	rowsMoved := 0
-	for rowsMoved < n {
-		prev := ft.cursor
-		ft.moveUp()
-		if ft.cursor == prev {
-			break
-		}
-		rowsMoved += prev - ft.cursor // counts skipped directory entries too
-	}
+	ft.cursor = max(ft.cursor-max(n, 1), 0)
 }
 
-// moveToFirst moves cursor to the first file entry.
+// moveToFirst moves cursor to the first visible entry.
 func (ft *FileTree) moveToFirst() {
-	for i, e := range ft.entries {
-		if !e.isDir {
-			ft.cursor = i
-			return
-		}
+	if len(ft.entries) > 0 {
+		ft.cursor = 0
 	}
 }
 
-// moveToLast moves cursor to the last file entry.
+// moveToLast moves cursor to the last visible entry.
 func (ft *FileTree) moveToLast() {
-	for i, e := range slices.Backward(ft.entries) {
-		if !e.isDir {
-			ft.cursor = i
-			return
-		}
+	if len(ft.entries) > 0 {
+		ft.cursor = len(ft.entries) - 1
 	}
 }
 

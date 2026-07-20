@@ -214,6 +214,8 @@ type FileTreeComponent interface {
 	StepFile(dir sidepane.Direction)
 	// SelectByPath sets the cursor to the file entry matching the given path.
 	SelectByPath(path string) bool
+	// ToggleSelectedDirectory collapses or expands the selected directory.
+	ToggleSelectedDirectory() bool
 	// SelectByVisibleRow sets the cursor to the entry at the given visible row
 	// (0-based, relative to the first visible tree line). Returns true when the
 	// row maps to a valid entry; the cursor is unchanged when false.
