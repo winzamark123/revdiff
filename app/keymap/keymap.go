@@ -39,6 +39,8 @@ const (
 	ActionNextHunk         Action = "next_hunk"
 	ActionPrevHunk         Action = "prev_hunk"
 	ActionTogglePane       Action = "toggle_pane"
+	ActionFocusLeft        Action = "focus_left"
+	ActionFocusRight       Action = "focus_right"
 	ActionFocusTree        Action = "focus_tree"
 	ActionFocusDiff        Action = "focus_diff"
 	ActionSearch           Action = "search"
@@ -83,7 +85,8 @@ var validActions = map[Action]bool{
 	ActionScrollCenter: true, ActionScrollTop: true, ActionScrollBottom: true,
 	ActionScrollDiffDown: true, ActionScrollDiffUp: true,
 	ActionNextItem: true, ActionPrevItem: true, ActionNextHunk: true, ActionPrevHunk: true,
-	ActionTogglePane: true, ActionFocusTree: true, ActionFocusDiff: true,
+	ActionTogglePane: true, ActionFocusLeft: true, ActionFocusRight: true,
+	ActionFocusTree: true, ActionFocusDiff: true,
 	ActionSearch:  true,
 	ActionConfirm: true, ActionAnnotateFile: true, ActionDeleteAnnotation: true, ActionAnnotList: true,
 	ActionNextAnnotation: true, ActionPrevAnnotation: true,
@@ -209,6 +212,8 @@ func defaultDescriptions() []HelpEntry {
 
 		// pane
 		{ActionTogglePane, "toggle pane focus", SectionPane},
+		{ActionFocusLeft, "focus left pane", SectionPane},
+		{ActionFocusRight, "focus right pane", SectionPane},
 		{ActionFocusTree, "focus tree pane", SectionPane},
 		{ActionFocusDiff, "focus diff pane", SectionPane},
 
@@ -274,8 +279,8 @@ func defaultBindings() map[string]Action {
 		"[":      ActionPrevHunk,
 		"e":      ActionOpenFileInEditor,
 		"tab":    ActionTogglePane,
-		"h":      ActionFocusTree,
-		"l":      ActionFocusDiff,
+		"h":      ActionFocusLeft,
+		"l":      ActionFocusRight,
 		"/":      ActionSearch,
 		"a":      ActionConfirm,
 		"enter":  ActionConfirm,

@@ -517,6 +517,35 @@ func TestModel_FocusSwitching(t *testing.T) {
 	assert.Equal(t, paneTree, model.layout.focus)
 }
 
+func TestModel_FocusSwitching_RightTree(t *testing.T) {
+	m := testModel([]string{"a.go"}, nil)
+	m.tree = testNewFileTree([]string{"a.go"})
+	m.cfg.treePosition = TreePositionRight
+	m.file.name = "a.go"
+	m.layout.focus = paneTree
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	model := result.(Model)
+	assert.Equal(t, paneDiff, model.layout.focus)
+
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	model = result.(Model)
+	assert.Equal(t, paneTree, model.layout.focus)
+}
+
+func TestModel_FocusSwitching_UserSemanticBinding(t *testing.T) {
+	m := testModel([]string{"a.go"}, nil)
+	m.tree = testNewFileTree([]string{"a.go"})
+	m.cfg.treePosition = TreePositionRight
+	m.keymap.Bind("h", keymap.ActionFocusTree)
+	m.file.name = "a.go"
+	m.layout.focus = paneDiff
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	model := result.(Model)
+	assert.Equal(t, paneTree, model.layout.focus)
+}
+
 func TestModel_WindowResize(t *testing.T) {
 	m := testModel([]string{"a.go"}, nil)
 	m.ready = false

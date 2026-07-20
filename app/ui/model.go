@@ -271,6 +271,14 @@ type TOCComponent interface {
 	Render(r sidepane.TOCRender) string
 }
 
+// TreePosition is the side of the screen where the file tree or markdown TOC renders.
+type TreePosition int
+
+const (
+	TreePositionLeft TreePosition = iota
+	TreePositionRight
+)
+
 // pane identifies which pane has focus.
 type pane int
 
@@ -322,6 +330,8 @@ type modelConfigState struct {
 	annotPrefix        string             // cached: marker + " "
 	annotFilePrefix    string             // cached: marker + " file: "
 	outputPath         string             // --output destination for the O in-session flush; empty disables it
+
+	treePosition TreePosition // side the file tree or markdown TOC renders on
 }
 
 // layoutState holds viewport and layout concerns that change on resize and pane toggles.
@@ -776,6 +786,8 @@ type ModelConfig struct {
 	// disables the flush (there is no file to write to); a non-empty path enables
 	// it. Copied into modelConfigState.outputPath as a plain value.
 	OutputPath string
+
+	TreePosition TreePosition // side the file tree or markdown TOC renders on
 }
 
 // NewModel creates a new Model from the given configuration. All dependencies
@@ -870,6 +882,7 @@ func NewModel(cfg ModelConfig) (Model, error) {
 			noConfirmReload:    cfg.NoConfirmReload,
 			crossFileHunks:     cfg.CrossFileHunks,
 			treeWidthRatio:     cfg.TreeWidthRatio,
+			treePosition:       cfg.TreePosition,
 			tabSpaces:          strings.Repeat(" ", cfg.TabWidth),
 			wrapIndent:         max(0, cfg.WrapIndent),
 			annotPrefix:        cfg.AnnotationMarker + " ",
@@ -1038,11 +1051,31 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.dispatchAction(action)
 }
 
+// resolveDirectionalFocus maps spatial focus actions to semantic pane actions.
+// Explicit user bindings to focus_tree or focus_diff bypass this mapping.
+func (m Model) resolveDirectionalFocus(action keymap.Action) keymap.Action {
+	switch action {
+	case keymap.ActionFocusLeft:
+		if m.cfg.treePosition == TreePositionRight {
+			return keymap.ActionFocusDiff
+		}
+		return keymap.ActionFocusTree
+	case keymap.ActionFocusRight:
+		if m.cfg.treePosition == TreePositionRight {
+			return keymap.ActionFocusTree
+		}
+		return keymap.ActionFocusDiff
+	default:
+		return action
+	}
+}
+
 // dispatchAction routes a resolved keymap action through overlay-open, the
 // global action switch, and the pane-specific nav fallback. It is the unified
 // dispatch path shared by keymap-resolved single keys (handleKey) and by
 // chord-resolved actions (handleChordSecond).
 func (m Model) dispatchAction(action keymap.Action) (tea.Model, tea.Cmd) {
+	action = m.resolveDirectionalFocus(action)
 	if model, cmd, ok := m.handleOverlayOpen(action); ok {
 		return model, cmd
 	}
