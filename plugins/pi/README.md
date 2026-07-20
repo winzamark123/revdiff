@@ -48,8 +48,8 @@ The model cannot launch or reopen revdiff; only the user can start or focus it w
 ## Notes
 
 - Requires pi to run inside tmux
-- Requires the `revdiff` binary on `PATH`
-- Set `REVDIFF_BIN=/absolute/path/to/revdiff` if pi cannot find the binary
+- Binary resolution order: `REVDIFF_BIN`, checkout-local `.bin/revdiff`, then `revdiff` on `PATH`
+- Run `make build` in a local package checkout to make `/diff` use that checkout's code
 - Line numbers are enabled by default; set `REVDIFF_LINE_NUMBERS=false` before starting pi to disable them
 - The review opens in a 50% pane to the right of pi
 - Exit code `10` means annotations were captured, not failure

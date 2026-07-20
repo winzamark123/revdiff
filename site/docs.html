@@ -148,8 +148,8 @@
         <h3>Notes</h3>
         <ul>
             <li>Requires pi to run inside tmux</li>
-            <li>Requires the <code>revdiff</code> binary on <code>PATH</code></li>
-            <li>Set <code>REVDIFF_BIN=/absolute/path/to/revdiff</code> if pi can’t find the binary</li>
+            <li>Binary resolution order: <code>REVDIFF_BIN</code>, checkout-local <code>.bin/revdiff</code>, then <code>revdiff</code> on <code>PATH</code></li>
+            <li>Run <code>make build</code> in a local package checkout to make <code>/diff</code> use that checkout’s code</li>
             <li>Line numbers are enabled by default; set <code>REVDIFF_LINE_NUMBERS=false</code> before starting pi to disable them</li>
             <li>The review opens in a 50% pane to the right of pi</li>
             <li>Exit code <code>10</code> means annotations were captured, not failure</li>

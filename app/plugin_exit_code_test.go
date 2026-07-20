@@ -714,6 +714,39 @@ function testPiReviewEnv(): void {
 	testAssert(overridden.REVDIFF_LINE_NUMBERS === "false", "pi should preserve an explicit line-number preference");
 }
 
+function testLocalBinaryResolution(): void {
+	const localBin = path.join(REPO_ROOT, ".bin", "revdiff");
+	const pathDir = mkdtempSync(path.join(tmpdir(), "pi-revdiff-path-"));
+	const envBin = path.join(pathDir, "env-revdiff");
+	const oldPath = process.env.PATH;
+	const oldBin = process.env.REVDIFF_BIN;
+	writeExecutable(localBin, "#!/bin/sh\nexit 0\n");
+	writeExecutable(path.join(pathDir, "revdiff"), "#!/bin/sh\nexit 0\n");
+	writeExecutable(envBin, "#!/bin/sh\nexit 0\n");
+
+	try {
+		delete process.env.REVDIFF_BIN;
+		process.env.PATH = pathDir;
+		testAssert(resolveRevdiffBin() === localBin, "the checkout-local binary should take precedence over PATH");
+
+		process.env.REVDIFF_BIN = envBin;
+		testAssert(resolveRevdiffBin() === envBin, "REVDIFF_BIN should take precedence over the checkout-local binary");
+	} finally {
+		if (oldPath === undefined) {
+			delete process.env.PATH;
+		} else {
+			process.env.PATH = oldPath;
+		}
+		if (oldBin === undefined) {
+			delete process.env.REVDIFF_BIN;
+		} else {
+			process.env.REVDIFF_BIN = oldBin;
+		}
+		rmSync(path.join(REPO_ROOT, ".bin"), { recursive: true, force: true });
+		rmSync(pathDir, { recursive: true, force: true });
+	}
+}
+
 async function testSidePaneFlushFocusAndExitDelivery(): Promise<void> {
 	const tempDir = mkdtempSync(path.join(tmpdir(), "pi-revdiff-side-pane-"));
 	const binDir = path.join(tempDir, "bin");
@@ -928,6 +961,7 @@ async function testStagedSmartDetection(): Promise<void> {
 }
 
 testPiReviewEnv();
+testLocalBinaryResolution();
 await testSidePaneFlushFocusAndExitDelivery();
 await testArgumentResolution();
 await testRefLikePathArgKeepsRef();

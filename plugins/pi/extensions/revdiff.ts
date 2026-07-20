@@ -581,15 +581,11 @@ function resolveRevdiffBin(): string | undefined {
 	if (fromEnv && existsSync(fromEnv)) {
 		return fromEnv;
 	}
-	const fromPath = findInPath("revdiff");
-	if (fromPath) {
-		return fromPath;
-	}
 	const local = path.join(REPO_ROOT, ".bin", "revdiff");
 	if (existsSync(local)) {
 		return local;
 	}
-	return undefined;
+	return findInPath("revdiff");
 }
 
 function findInPath(binary: string): string | undefined {

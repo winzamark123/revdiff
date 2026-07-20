@@ -32,7 +32,7 @@ Built for a specific use case: reviewing code changes, plans, and documents with
 - All-files mode: browse and annotate all tracked files with `--all-files` (git `ls-files` or jj `file list`), filter with `--include` and `--exclude`
 - No-VCS file review: `--only` files outside a VCS repo (or not in any diff) are shown as context-only with full annotation support
 - Scratch-buffer review: annotate arbitrary piped or redirected text with `--stdin`, optionally naming it with `--stdin-name`. When the piped content sniffs as a git unified diff, revdiff parses it as a real multi-file diff (review `gh pr diff` or `git format-patch -1 --stdout` output directly); otherwise the input is shown as a single context-only buffer.
-- Pi package: launch revdiff from pi, capture annotations, and send them to the agent immediately for the normal review loop
+- Pi package: open revdiff beside pi in tmux and send flushed annotations to the agent
 - Review history: auto-saves annotations and diffs to `~/.config/revdiff/history/` on quit as a safety net
 - Fully customizable colors via environment variables, CLI flags, or config file
 - Custom keybindings: remap any key via config file, export defaults with `--dump-keys`
@@ -219,8 +219,8 @@ Press `O` in revdiff to send the current annotation snapshot to pi without closi
 **Notes:**
 
 - Requires pi to run inside tmux
-- Requires the `revdiff` binary on `PATH`
-- Set `REVDIFF_BIN=/absolute/path/to/revdiff` if pi can't find the binary
+- Binary resolution order: `REVDIFF_BIN`, checkout-local `.bin/revdiff`, then `revdiff` on `PATH`
+- Run `make build` in a local package checkout to make `/diff` use that checkout's code
 - Line numbers are enabled by default; set `REVDIFF_LINE_NUMBERS=false` before starting pi to disable them
 - The review opens in a 50% pane to the right of pi
 - Exit code `10` means annotations were captured, not failure
