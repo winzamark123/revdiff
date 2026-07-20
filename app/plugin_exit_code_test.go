@@ -184,21 +184,28 @@ func TestOpenCodeCallersPreserveAnnotationExitCode(t *testing.T) {
 	assert.Contains(t, plugin, "if (!annotations) return;")
 }
 
-func TestPiCallerPreservesAnnotationExitCode(t *testing.T) {
+func TestPiCommandIsUserOnly(t *testing.T) {
 	root := testRepoRoot(t)
 	src := readRepoFile(t, root, "plugins", "pi", "extensions", "revdiff.ts")
 	assert.Contains(t, src, `const EXIT_CODE_ON_ANNOTATIONS_ENV = "REVDIFF_EXIT_CODE_ON_ANNOTATIONS";`)
+	assert.Contains(t, src, `const LINE_NUMBERS_ENV = "REVDIFF_LINE_NUMBERS";`)
 	assert.Contains(t, src, "const commandArgs = [...launch.args, `--output=${outputFile}`];")
-	assert.Contains(t, src, "env: withAnnotationExitCode(process.env),")
-	assert.NotContains(t, src, "runOverlayReview")
-	assert.NotContains(t, src, "withRevdiffOnPath")
-	assert.NotContains(t, src, "spawnSync(launcher")
+	assert.Contains(t, src, `[LINE_NUMBERS_ENV]: env[LINE_NUMBERS_ENV] ?? "true"`)
+	assert.Contains(t, src, `pi.registerCommand("diff", {`)
+	assert.Contains(t, src, `"split-window"`)
+	assert.Contains(t, src, `"-h"`)
+	assert.Contains(t, src, `"50%"`)
+	assert.Contains(t, src, `pi.on("session_shutdown"`)
+	assert.Contains(t, src, `{ deliverAs: "followUp" }`)
+	assert.Contains(t, src, "focusTmuxPane(activeReview)")
 	assert.Contains(t, src, "return exitCode === 0 || exitCode === EXIT_CODE_ANNOTATIONS;")
-	assert.Contains(t, src, "if (!outputExists && exitCode === EXIT_CODE_ANNOTATIONS)")
-	assert.Contains(t, src, "if (result.signal)")
-	assert.Contains(t, src, "done(result.status ?? 1)")
-	assert.Contains(t, src, "revdiff terminated by signal")
-	assert.Contains(t, src, "return buildResult(launch, rawOutput, cwd);")
+	assert.NotContains(t, src, "ctx.ui.custom")
+	assert.NotContains(t, src, "registerTool")
+	assert.NotContains(t, src, "revdiff_review")
+
+	manifest := readRepoFile(t, root, "package.json")
+	assert.NotContains(t, manifest, `"skills"`)
+	assert.NoFileExists(t, filepath.Join(root, "plugins", "pi", "skills", "revdiff", "SKILL.md"))
 }
 
 func TestPiExecutableRegressionHasCIBunSetup(t *testing.T) {
@@ -217,7 +224,6 @@ func TestPiExtensionExecutableBehavior(t *testing.T) {
 	root := testRepoRoot(t)
 	tmp := t.TempDir()
 	testPath := filepath.Join(tmp, "plugins", "pi", "extensions", "revdiff-test.ts")
-	writeTestFile(t, filepath.Join(tmp, "node_modules", "typebox", "index.ts"), piTypeboxStub())
 	writeTestFile(t, testPath, readRepoFile(t, root, "plugins", "pi", "extensions", "revdiff.ts")+piExtensionHarness())
 
 	res := runTestCmd(t, cmdReq{
@@ -227,15 +233,6 @@ func TestPiExtensionExecutableBehavior(t *testing.T) {
 		env:  map[string]string{"PATH": os.Getenv("PATH")},
 	})
 	require.Equal(t, 0, res.code, "stdout:\n%s\nstderr:\n%s", res.stdout, res.stderr)
-}
-
-func piTypeboxStub() string {
-	return `export const Type = {
-  Object: (schema: unknown) => schema,
-  Optional: (schema: unknown) => schema,
-  String: (options?: unknown) => ({ type: "string", options }),
-};
-`
 }
 
 func piExtensionHarness() string {
@@ -254,11 +251,12 @@ function assertArray(actual: string[], expected: string[], message: string): voi
 	testAssert(actualText === expectedText, message + ": got " + actualText + ", want " + expectedText);
 }
 
-function fakeCtx(choice?: "uncommitted" | "branch") {
+function fakeCtx(choice?: "uncommitted" | "branch", cwd = process.cwd(), idle = true) {
 	return {
 		hasUI: true,
-		cwd: process.cwd(),
-		isIdle: () => true,
+		mode: "tui",
+		cwd,
+		isIdle: () => idle,
 		ui: {
 			notifications: [] as string[],
 			notify(message: string) {
@@ -267,38 +265,26 @@ function fakeCtx(choice?: "uncommitted" | "branch") {
 			select(_title: string, choices: string[]) {
 				return choice === "branch" ? choices[1] : choices[0];
 			},
-			custom(factory: any) {
-				let value: unknown;
-				factory(
-					{ stop() {}, start() {}, requestRender(_full?: boolean) {} },
-					{},
-					{},
-					(next: unknown) => {
-						value = next;
-					},
-				);
-				return value;
-			},
 		},
 	} as any;
 }
 
 function fakePi() {
 	const commands = new Map<string, any>();
-	const tools = new Map<string, any>();
-	const sentMessages: string[] = [];
+	const handlers = new Map<string, Array<() => void>>();
+	const sentMessages: Array<{ message: string; options?: { deliverAs: string } }> = [];
 	return {
 		commands,
-		tools,
+		handlers,
 		sentMessages,
+		on(name: string, handler: () => void) {
+			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+		},
 		registerCommand(name: string, command: any) {
 			commands.set(name, command);
 		},
-		registerTool(tool: any) {
-			tools.set(tool.name, tool);
-		},
-		sendUserMessage(message: string) {
-			sentMessages.push(message);
+		sendUserMessage(message: string, options?: { deliverAs: string }) {
+			sentMessages.push({ message, options });
 		},
 	} as any;
 }
@@ -309,190 +295,168 @@ function writeExecutable(pathname: string, content: string): void {
 	testChmodSync(pathname, 0o700);
 }
 
+function fakeTmuxScript(): string {
+	return [
+		"#!/bin/sh",
+		"command=$1",
+		"shift",
+		"case \"$command\" in",
+		"  split-window)",
+		"    printf '%s\\n' \"$@\" > \"$FAKE_TMUX_ARGS_FILE\"",
+		"    launch=",
+		"    for arg in \"$@\"; do launch=$arg; done",
+		"    : > \"$FAKE_TMUX_PANE_FILE\"",
+		"    (sh -c \"$launch\"; rm -f \"$FAKE_TMUX_PANE_FILE\") &",
+		"    echo '%99'",
+		"    ;;",
+		"  display-message)",
+		"    test -f \"$FAKE_TMUX_PANE_FILE\"",
+		"    ;;",
+		"  select-pane)",
+		"    test -f \"$FAKE_TMUX_PANE_FILE\" || exit 1",
+		"    : > \"$FAKE_TMUX_FOCUS_FILE\"",
+		"    ;;",
+		"  kill-pane)",
+		"    rm -f \"$FAKE_TMUX_PANE_FILE\"",
+		"    ;;",
+		"  *) exit 2;;",
+		"esac",
+		"",
+	].join("\n");
+}
+
 function fakeRevdiffScript(): string {
 	return [
 		"#!/bin/sh",
 		"test \"$REVDIFF_EXIT_CODE_ON_ANNOTATIONS\" = \"true\" || exit 21",
+		"test \"$REVDIFF_LINE_NUMBERS\" = \"true\" || exit 23",
 		"out=",
 		"for arg in \"$@\"; do",
 		"  case \"$arg\" in --output=*) out=${arg#--output=};; esac",
 		"done",
 		"test -n \"$out\" || exit 22",
-		"printf '## src/app.go:12-14 (+)\\nfix it\\n' > \"$out\"",
 		"printf '%s\\n' \"$@\" > \"$FAKE_ARG_FILE\"",
-		"[ -z \"${FAKE_CWD_FILE:-}\" ] || pwd > \"$FAKE_CWD_FILE\"",
+		"pwd > \"$FAKE_CWD_FILE\"",
+		"cp \"$FAKE_INITIAL_ANNOTATIONS_FILE\" \"$out.tmp\" && mv -f \"$out.tmp\" \"$out\"",
+		"sleep 0.1",
+		"cp \"$FAKE_INITIAL_ANNOTATIONS_FILE\" \"$out.tmp\" && mv -f \"$out.tmp\" \"$out\"",
+		"while [ ! -f \"$FAKE_EXIT_SIGNAL\" ]; do sleep 0.02; done",
+		"cp \"$FAKE_FINAL_ANNOTATIONS_FILE\" \"$out.tmp\" && mv -f \"$out.tmp\" \"$out\"",
 		"exit 10",
 		"",
 	].join("\n");
 }
 
-function fakeSignalRevdiffScript(): string {
-	return ["#!/bin/sh", "kill -TERM $$", ""].join("\n");
-}
-
-async function testCommandRoutesToSkill(): Promise<void> {
-	const pi = fakePi();
-	revdiffExtension(pi);
-
-	await pi.commands.get("revdiff").handler("last tag", fakeCtx());
-	testAssert(pi.sentMessages.length === 1, "expected /revdiff to route through the skill");
-	testAssert(pi.sentMessages[0] === "/skill:revdiff last tag", "expected /revdiff args to be passed to /skill:revdiff");
-
-	await pi.commands.get("revdiff").handler("", fakeCtx());
-	testAssert(pi.sentMessages.length === 2, "expected no-arg /revdiff to route through the skill");
-	testAssert(pi.sentMessages[1] === "/skill:revdiff", "expected no-arg /revdiff to call the skill without args");
-}
-
-async function testToolReturnsAnnotations(): Promise<void> {
-	const tempDir = mkdtempSync(path.join(tmpdir(), "pi-revdiff-tool-"));
-	const fakeBin = path.join(tempDir, "revdiff");
-	const argFile = path.join(tempDir, "args.txt");
-	writeExecutable(fakeBin, fakeRevdiffScript());
-
-	const oldBin = process.env.REVDIFF_BIN;
-	const oldArgFile = process.env.FAKE_ARG_FILE;
-	process.env.REVDIFF_BIN = fakeBin;
-	process.env.FAKE_ARG_FILE = argFile;
-	try {
-		const pi = fakePi();
-		revdiffExtension(pi);
-		const result = await pi.tools.get("revdiff_review").execute("call-1", { args: "--only README.md" }, undefined, undefined, fakeCtx());
-		const text = result.content[0].text;
-		testAssert(text.includes("Captured 1 annotation for README.md."), "tool result should summarize captured annotations");
-		testAssert(text.includes("Annotations:\n## src/app.go:12-14 (+)\nfix it"), "tool result should include raw annotation text");
-		testAssert(result.details.rawOutput.includes("## src/app.go:12-14 (+)"), "tool details should preserve raw output");
-	} finally {
-		if (oldBin === undefined) {
-			delete process.env.REVDIFF_BIN;
-		} else {
-			process.env.REVDIFF_BIN = oldBin;
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+	const deadline = Date.now() + 3000;
+	while (!condition()) {
+		if (Date.now() >= deadline) {
+			throw new Error(message);
 		}
-		if (oldArgFile === undefined) {
-			delete process.env.FAKE_ARG_FILE;
-		} else {
-			process.env.FAKE_ARG_FILE = oldArgFile;
-		}
-		rmSync(tempDir, { recursive: true, force: true });
+		await Bun.sleep(20);
 	}
 }
 
-function testReviewCwdResolution(): void {
-	const base = mkdtempSync(path.join(tmpdir(), "pi-revdiff-cwd-base-"));
-	const child = path.join(base, "child");
-	testMkdirSync(child, { recursive: true });
-	try {
-		const resolvedHome = resolveReviewCwd("~/", base);
-		testAssert(resolvedHome === homedir(), "~/ should expand to the home directory");
-		testAssert(resolveReviewCwd("child", base) === child, "relative cwd should resolve against ctx cwd");
-	} finally {
-		rmSync(base, { recursive: true, force: true });
-	}
+function testPiReviewEnv(): void {
+	const defaults = withPiReviewEnv({});
+	testAssert(defaults.REVDIFF_EXIT_CODE_ON_ANNOTATIONS === "true", "pi should request annotation exit codes");
+	testAssert(defaults.REVDIFF_LINE_NUMBERS === "true", "pi should enable line numbers by default");
+
+	const overridden = withPiReviewEnv({ REVDIFF_LINE_NUMBERS: "false" });
+	testAssert(overridden.REVDIFF_LINE_NUMBERS === "false", "pi should preserve an explicit line-number preference");
 }
 
-async function testToolRejectsInvalidCwd(): Promise<void> {
-	const tempDir = mkdtempSync(path.join(tmpdir(), "pi-revdiff-invalid-cwd-"));
-	const file = path.join(tempDir, "not-a-dir.txt");
-	testWriteFileSync(file, "not a directory\n");
-	try {
-		const pi = fakePi();
-		revdiffExtension(pi);
-		const fileResult = await pi.tools.get("revdiff_review").execute("call-1", { cwd: file }, undefined, undefined, fakeCtx());
-		testAssert(fileResult.content[0].text === "Could not resolve revdiff working directory.", "file cwd should return a clear error");
-		const missingResult = await pi.tools
-			.get("revdiff_review")
-			.execute("call-2", { cwd: path.join(tempDir, "missing") }, undefined, undefined, fakeCtx());
-		testAssert(missingResult.content[0].text === "Could not resolve revdiff working directory.", "missing cwd should return a clear error");
-	} finally {
-		rmSync(tempDir, { recursive: true, force: true });
-	}
-}
-
-async function testToolCwdParameter(): Promise<void> {
-	const tempDir = mkdtempSync(path.join(tmpdir(), "pi-revdiff-cwd-"));
-	const fakeBin = path.join(tempDir, "revdiff");
+async function testSidePaneFlushFocusAndExitDelivery(): Promise<void> {
+	const tempDir = mkdtempSync(path.join(tmpdir(), "pi-revdiff-side-pane-"));
+	const binDir = path.join(tempDir, "bin");
 	const targetRepo = path.join(tempDir, "repo with spaces");
 	const argFile = path.join(tempDir, "args.txt");
 	const cwdFile = path.join(tempDir, "cwd.txt");
-	writeExecutable(fakeBin, fakeRevdiffScript());
+	const paneFile = path.join(tempDir, "pane");
+	const focusFile = path.join(tempDir, "focus");
+	const tmuxArgsFile = path.join(tempDir, "tmux-args.txt");
+	const exitSignal = path.join(tempDir, "exit");
+	const initialAnnotations = path.join(tempDir, "initial.md");
+	const finalAnnotations = path.join(tempDir, "final.md");
+	writeExecutable(path.join(binDir, "tmux"), fakeTmuxScript());
+	writeExecutable(path.join(binDir, "revdiff"), fakeRevdiffScript());
 	testMkdirSync(targetRepo, { recursive: true });
 	testWriteFileSync(path.join(targetRepo, "README.md"), "hello\n");
+	testWriteFileSync(initialAnnotations, "## src/app.go:12-14 (+)\nfix it\n");
+	testWriteFileSync(finalAnnotations, "## src/app.go:12-14 (+)\nfix it\n\n## src/store.go:7 (+)\nadd a guard\n");
 
-	const oldBin = process.env.REVDIFF_BIN;
-	const oldArgFile = process.env.FAKE_ARG_FILE;
-	const oldCwdFile = process.env.FAKE_CWD_FILE;
-	process.env.REVDIFF_BIN = fakeBin;
-	process.env.FAKE_ARG_FILE = argFile;
-	process.env.FAKE_CWD_FILE = cwdFile;
+	const envKeys = [
+		"PATH",
+		"REVDIFF_BIN",
+		"TMUX",
+		"TMUX_PANE",
+		"FAKE_ARG_FILE",
+		"FAKE_CWD_FILE",
+		"FAKE_TMUX_ARGS_FILE",
+		"FAKE_TMUX_PANE_FILE",
+		"FAKE_TMUX_FOCUS_FILE",
+		"FAKE_EXIT_SIGNAL",
+		"FAKE_INITIAL_ANNOTATIONS_FILE",
+		"FAKE_FINAL_ANNOTATIONS_FILE",
+	] as const;
+	const oldEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+	Object.assign(process.env, {
+		PATH: binDir + path.delimiter + process.env.PATH,
+		REVDIFF_BIN: path.join(binDir, "revdiff"),
+		TMUX: "test",
+		TMUX_PANE: "%1",
+		FAKE_ARG_FILE: argFile,
+		FAKE_CWD_FILE: cwdFile,
+		FAKE_TMUX_ARGS_FILE: tmuxArgsFile,
+		FAKE_TMUX_PANE_FILE: paneFile,
+		FAKE_TMUX_FOCUS_FILE: focusFile,
+		FAKE_EXIT_SIGNAL: exitSignal,
+		FAKE_INITIAL_ANNOTATIONS_FILE: initialAnnotations,
+		FAKE_FINAL_ANNOTATIONS_FILE: finalAnnotations,
+	});
+
 	try {
 		const pi = fakePi();
+		const ctx = fakeCtx(undefined, targetRepo, false);
 		revdiffExtension(pi);
-		const result = await pi.tools.get("revdiff_review").execute("call-1", { args: "README.md", cwd: targetRepo }, undefined, undefined, fakeCtx());
-		const text = result.content[0].text;
-		testAssert(text.includes("Captured 1 annotation for README.md."), "cwd parameter should still review target file");
-		testAssert(result.details.cwd === targetRepo, "tool details should preserve cwd for reruns");
+		testAssert(pi.commands.has("diff"), "expected /diff to be registered");
+		testAssert(!pi.commands.has("revdiff"), "expected /revdiff to be removed");
+
+		await pi.commands.get("diff").handler("README.md", ctx);
+		await waitFor(() => pi.sentMessages.length === 1, "O flush should send annotations while revdiff remains open");
+		testAssert(pi.sentMessages[0].message.includes("Address the 1 revdiff annotation for README.md."), "flush should summarize the review");
+		testAssert(pi.sentMessages[0].message.includes("## src/app.go:12-14 (+)\nfix it"), "flush should include annotations");
+		testAssert(pi.sentMessages[0].options?.deliverAs === "followUp", "busy pi sessions should receive annotations as a follow-up");
+
+		await Bun.sleep(180);
+		testAssert(pi.sentMessages.length === 1, "an unchanged O snapshot should not be sent twice");
+		await pi.commands.get("diff").handler("HEAD~1", ctx);
+		await waitFor(() => existsSync(focusFile), "a second /diff should focus the existing revdiff pane");
+		testAssert(pi.sentMessages.length === 1, "focusing the existing pane should not start another review");
+
+		testWriteFileSync(exitSignal, "done\n");
+		await waitFor(() => pi.sentMessages.length === 2, "q should send a final annotation snapshot that was not flushed");
+		await waitFor(
+			() => ctx.ui.notifications.some((message: string) => message.includes("Review pane closed")),
+			"closing revdiff should finish the review session",
+		);
+		testAssert(pi.sentMessages[1].message.includes("Address the 2 revdiff annotations for README.md."), "final snapshot should include both annotations");
 		testAssert(
 			testRealpathSync(readFileSync(cwdFile, "utf8").trim()) === testRealpathSync(targetRepo),
-			"revdiff should launch in requested directory",
+			"revdiff should launch in the command working directory",
 		);
-		let argText = readFileSync(argFile, "utf8");
-		testAssert(argText.includes("--only\nREADME.md\n"), "file target in requested directory should resolve to --only README.md");
-		testAssert(!argText.includes(targetRepo), "cwd parameter should not be passed as a revdiff argument");
-
-		rmSync(cwdFile, { force: true });
-		const rerun = await pi.tools
-			.get("revdiff_review")
-			.execute("call-2", { args: result.details.argsText, cwd: result.details.cwd }, undefined, undefined, fakeCtx());
-		testAssert(rerun.details.cwd === targetRepo, "rerun details should preserve cwd");
-		testAssert(
-			testRealpathSync(readFileSync(cwdFile, "utf8").trim()) === testRealpathSync(targetRepo),
-			"rerun should launch in requested directory",
-		);
-		argText = readFileSync(argFile, "utf8");
-		testAssert(argText.includes("--only\nREADME.md\n"), "rerun should use returned args with preserved cwd");
-		testAssert(!argText.includes(targetRepo), "rerun cwd should not be passed as a revdiff argument");
+		const argText = readFileSync(argFile, "utf8");
+		testAssert(argText.includes("--only\nREADME.md\n"), "file target should resolve to --only README.md");
+		const tmuxArgs = readFileSync(tmuxArgsFile, "utf8");
+		testAssert(tmuxArgs.includes("-h\n-l\n50%\n"), "revdiff should open in a 50 percent right-side pane");
 	} finally {
-		if (oldBin === undefined) {
-			delete process.env.REVDIFF_BIN;
-		} else {
-			process.env.REVDIFF_BIN = oldBin;
-		}
-		if (oldArgFile === undefined) {
-			delete process.env.FAKE_ARG_FILE;
-		} else {
-			process.env.FAKE_ARG_FILE = oldArgFile;
-		}
-		if (oldCwdFile === undefined) {
-			delete process.env.FAKE_CWD_FILE;
-		} else {
-			process.env.FAKE_CWD_FILE = oldCwdFile;
-		}
-		rmSync(tempDir, { recursive: true, force: true });
-	}
-}
-
-async function testSignalTerminatedReviewFails(): Promise<void> {
-	const tempDir = mkdtempSync(path.join(tmpdir(), "pi-revdiff-signal-"));
-	const fakeBin = path.join(tempDir, "revdiff");
-	writeExecutable(fakeBin, fakeSignalRevdiffScript());
-
-	const oldBin = process.env.REVDIFF_BIN;
-	process.env.REVDIFF_BIN = fakeBin;
-	try {
-		const pi = fakePi();
-		const ctx = fakeCtx();
-		revdiffExtension(pi);
-		const result = await pi.tools.get("revdiff_review").execute("call-1", { args: "--only README.md" }, undefined, undefined, ctx);
-
-		testAssert(result.content[0].text === "revdiff review did not complete.", "signal-terminated revdiff should return incomplete result");
-		testAssert(
-			ctx.ui.notifications.some((message: string) => message.includes("terminated by signal")),
-			"signal-terminated revdiff should notify failure",
-		);
-	} finally {
-		if (oldBin === undefined) {
-			delete process.env.REVDIFF_BIN;
-		} else {
-			process.env.REVDIFF_BIN = oldBin;
+		for (const key of envKeys) {
+			const value = oldEnv.get(key);
+			if (value === undefined) {
+				delete process.env[key];
+			} else {
+				process.env[key] = value;
+			}
 		}
 		rmSync(tempDir, { recursive: true, force: true });
 	}
@@ -615,12 +579,8 @@ async function testStagedSmartDetection(): Promise<void> {
 	}
 }
 
-await testCommandRoutesToSkill();
-await testToolReturnsAnnotations();
-testReviewCwdResolution();
-await testToolRejectsInvalidCwd();
-await testToolCwdParameter();
-await testSignalTerminatedReviewFails();
+testPiReviewEnv();
+await testSidePaneFlushFocusAndExitDelivery();
 await testArgumentResolution();
 await testRefLikePathArgKeepsRef();
 await testNeedsAskWithoutMainStops();

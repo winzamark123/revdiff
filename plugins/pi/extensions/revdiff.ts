@@ -1,14 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 
 const EXIT_CODE_ANNOTATIONS = 10;
 const EXIT_CODE_ON_ANNOTATIONS_ENV = "REVDIFF_EXIT_CODE_ON_ANNOTATIONS";
+const LINE_NUMBERS_ENV = "REVDIFF_LINE_NUMBERS";
 const ANNOTATION_HEADER_RE = /^## (.+?)(?::(\d+)(?:-\d+)?)? \(([^)]+)\)$/;
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PI_PLUGIN_ROOT = path.resolve(EXT_DIR, "..");
@@ -23,9 +23,6 @@ interface AnnotationItem {
 }
 
 interface ReviewResult {
-	args: string[];
-	argsText: string;
-	cwd: string;
 	label: string;
 	rawOutput: string;
 	annotations: AnnotationItem[];
@@ -46,103 +43,150 @@ interface SmartDetectResult {
 	needsAsk: boolean;
 }
 
+interface ActiveReview {
+	label: string;
+	lastOutput: string;
+	outputFile: string;
+	paneId: string;
+	pollTimer?: ReturnType<typeof setInterval>;
+	sentinelFile: string;
+	tempDir: string;
+	tmuxBin: string;
+	watcher: FSWatcher;
+}
+
 export default function revdiffExtension(pi: ExtensionAPI): void {
-	pi.registerCommand("revdiff", {
-		description: "Resolve a revdiff request through the revdiff skill",
-		handler: async (args) => {
-			pi.sendUserMessage(skillCommand(args));
-		},
-	});
+	let activeReview: ActiveReview | undefined;
 
-	pi.registerTool({
-		name: "revdiff_review",
-		label: "revdiff review",
-		description: "Launch revdiff in pi, capture interactive review annotations, and return them to the agent.",
-		promptSnippet: "Launch an interactive revdiff review and return captured annotations.",
-		promptGuidelines: [
-			"Use revdiff_review only when the user explicitly asks for revdiff, an interactive annotation pass, or captured revdiff annotations inside pi.",
-			"Do not use revdiff_review for ordinary autonomous code-review requests like 'review the code', 'review my changes', or 'review the diff'; inspect the code directly instead.",
-			"When revdiff_review captures annotations, read them from the tool result content; do not read revdiff history unless the tool reports an incomplete/missing-output result or the user explicitly asks for history.",
-			"If revdiff_review returns no annotations, stop. Do not relaunch revdiff after any no-annotation result unless the user explicitly asks for another review.",
-			"Rerun the original revdiff_review target only after code changes or when the user asks to continue reviewing; do not rerun it after explanation-only annotations are answered.",
-		],
-		parameters: Type.Object({
-			args: Type.Optional(
-				Type.String({
-					description:
-						"Optional revdiff arguments as a shell-like string, for example 'main', '--staged', '--only README.md', or '--all-files --exclude vendor'. Omit for smart detection.",
-				}),
-			),
-			cwd: Type.Optional(
-				Type.String({
-					description: "Optional working directory for revdiff and git target resolution. Defaults to the current working directory.",
-				}),
-			),
-		}),
-		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
-			if (!ctx.hasUI) {
-				return toolTextResult("revdiff_review requires the interactive pi TUI.");
-			}
-
-			const cwd = resolveReviewCwd(params.cwd, ctx.cwd);
-			if (!cwd) {
-				return toolTextResult("Could not resolve revdiff working directory.");
-			}
-
-			const launch = await resolveLaunchSpec(params.args?.trim() ?? "", ctx, cwd);
-			if (!launch) {
-				return toolTextResult("Could not resolve a revdiff launch target.");
-			}
-
-			onUpdate?.({ content: [{ type: "text", text: `Launching revdiff for ${launch.label} in ${cwd}...` }], details: null });
-			const result = await runDirectReview(ctx, launch, cwd);
-			if (!result) {
-				return toolTextResult("revdiff review did not complete.");
-			}
-
-			if (result.annotations.length === 0) {
-				return toolTextResult(`Review complete — no annotations for ${result.label}.`, result);
-			}
-
-			const noun = result.annotations.length === 1 ? "annotation" : "annotations";
-			return toolTextResult(
-				[`Captured ${result.annotations.length} ${noun} for ${result.label}.`, "", "Annotations:", result.rawOutput.trim()].join("\n"),
-				result,
-			);
-		},
-	});
-}
-
-function toolTextResult(content: string, details?: ReviewResult) {
-	return { content: [{ type: "text" as const, text: content }], details: details ?? null };
-}
-
-function skillCommand(rawArgs: string): string {
-	const trimmed = rawArgs.trim();
-	return trimmed ? `/skill:revdiff ${trimmed}` : "/skill:revdiff";
-}
-
-function resolveReviewCwd(rawCwd: string | undefined, baseCwd: string): string | undefined {
-	const expanded = expandHome(rawCwd?.trim() || baseCwd);
-	const resolved = path.resolve(baseCwd, expanded);
-	try {
-		if (!statSync(resolved).isDirectory()) {
-			return undefined;
+	function stopReview(review: ActiveReview, killPane: boolean): void {
+		review.watcher.close();
+		if (review.pollTimer) {
+			clearInterval(review.pollTimer);
 		}
-	} catch {
-		return undefined;
+		if (killPane && tmuxPaneExists(review)) {
+			spawnSync(review.tmuxBin, ["kill-pane", "-t", review.paneId], { env: process.env, stdio: "ignore" });
+		}
+		rmSync(review.tempDir, { recursive: true, force: true });
+		if (activeReview === review) {
+			activeReview = undefined;
+		}
 	}
-	return resolved;
+
+	function deliverOutput(review: ActiveReview, ctx: ExtensionContext): void {
+		if (!existsSync(review.outputFile)) {
+			return;
+		}
+		const rawOutput = readFileSync(review.outputFile, "utf8").trim();
+		if (!rawOutput || rawOutput === review.lastOutput) {
+			return;
+		}
+
+		const result = {
+			label: review.label,
+			rawOutput,
+			annotations: parseAnnotations(rawOutput),
+		};
+		if (result.annotations.length === 0) {
+			return;
+		}
+
+		try {
+			pi.sendUserMessage(reviewMessage(result), ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+			review.lastOutput = rawOutput;
+		} catch (error) {
+			ctx.ui.notify(`Failed to send revdiff annotations: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
+	}
+
+	function finishReview(review: ActiveReview, ctx: ExtensionContext): void {
+		const outputExists = existsSync(review.outputFile) && Boolean(readFileSync(review.outputFile, "utf8").trim());
+		deliverOutput(review, ctx);
+		const exitCode = Number.parseInt(readFileSync(review.sentinelFile, "utf8").trim(), 10);
+		stopReview(review, false);
+
+		if (!isRevdiffSuccess(exitCode)) {
+			ctx.ui.notify(`revdiff exited with code ${Number.isNaN(exitCode) ? "unknown" : exitCode}`, "warning");
+			return;
+		}
+		if (exitCode === EXIT_CODE_ANNOTATIONS && !outputExists) {
+			ctx.ui.notify("revdiff reported annotations without writing output", "warning");
+			return;
+		}
+		ctx.ui.notify(
+			review.lastOutput ? `Review pane closed for ${review.label}.` : `Review complete — no annotations for ${review.label}.`,
+			"info",
+		);
+	}
+
+	pi.on("session_shutdown", () => {
+		if (activeReview) {
+			stopReview(activeReview, true);
+		}
+	});
+
+	pi.registerCommand("diff", {
+		description: "Open revdiff in a right-side pane for an explicit interactive review",
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") {
+				return;
+			}
+
+			if (activeReview) {
+				if (focusTmuxPane(activeReview)) {
+					return;
+				}
+				deliverOutput(activeReview, ctx);
+				stopReview(activeReview, false);
+			}
+
+			const launch = await resolveLaunchSpec(args.trim(), ctx, ctx.cwd);
+			if (!launch) {
+				return;
+			}
+
+			const review = startSideReview({ launch, cwd: ctx.cwd, ctx });
+			if (!review) {
+				return;
+			}
+			activeReview = review;
+
+			const processFiles = () => {
+				if (activeReview !== review) {
+					return;
+				}
+				deliverOutput(review, ctx);
+				if (existsSync(review.sentinelFile)) {
+					finishReview(review, ctx);
+				}
+			};
+			review.watcher.on("change", processFiles);
+			review.watcher.on("error", (error) => {
+				if (activeReview !== review) {
+					return;
+				}
+				stopReview(review, true);
+				ctx.ui.notify(`Failed to watch revdiff annotations: ${error.message}`, "error");
+			});
+			review.pollTimer = setInterval(() => {
+				processFiles();
+				if (activeReview === review && !tmuxPaneExists(review) && !existsSync(review.sentinelFile)) {
+					stopReview(review, false);
+					ctx.ui.notify(`Review pane closed unexpectedly for ${review.label}.`, "warning");
+				}
+			}, 300);
+			processFiles();
+		},
+	});
 }
 
-function expandHome(value: string): string {
-	if (value === "~") {
-		return homedir();
-	}
-	if (value.startsWith("~/") || value.startsWith("~\\")) {
-		return path.join(homedir(), value.slice(2));
-	}
-	return value;
+function reviewMessage(result: ReviewResult): string {
+	const noun = result.annotations.length === 1 ? "annotation" : "annotations";
+	return [
+		`Address the ${result.annotations.length} revdiff ${noun} for ${result.label}.`,
+		"Do not launch or reopen revdiff; only the user may start it with /diff.",
+		"",
+		result.rawOutput.trim(),
+	].join("\n");
 }
 
 async function resolveLaunchSpec(rawArgs: string, ctx: ExtensionContext, cwd: string): Promise<LaunchSpec | undefined> {
@@ -178,13 +222,13 @@ async function resolveLaunchSpec(rawArgs: string, ctx: ExtensionContext, cwd: st
 async function detectSmartLaunch(ctx: ExtensionContext, cwd: string): Promise<LaunchSpec | undefined> {
 	const detected = detectSmartRef(cwd);
 	if (!detected) {
-		ctx.ui.notify("Not inside a supported VCS repo or smart detection is unavailable. Use /revdiff --only <file> to review a standalone file.", "warning");
+		ctx.ui.notify("Not inside a supported VCS repo or smart detection is unavailable. Use /diff --only <file> to review a standalone file.", "warning");
 		return undefined;
 	}
 
 	if (detected.needsAsk) {
 		if (!detected.mainBranch) {
-			ctx.ui.notify("Could not determine a revdiff target. Pass a ref or use /revdiff --only <file>.", "warning");
+			ctx.ui.notify("Could not determine a revdiff target. Pass a ref or use /diff --only <file>.", "warning");
 			return undefined;
 		}
 		const choice = await ctx.ui.select("revdiff", [
@@ -218,86 +262,114 @@ function uncommittedLaunchSpec(detected: SmartDetectResult): LaunchSpec {
 	return { args: [], label: "uncommitted changes" };
 }
 
-async function runDirectReview(ctx: ExtensionContext, launch: LaunchSpec, cwd: string): Promise<ReviewResult | undefined> {
+interface StartSideReviewParams {
+	launch: LaunchSpec;
+	cwd: string;
+	ctx: ExtensionContext;
+}
+
+function startSideReview({ launch, cwd, ctx }: StartSideReviewParams): ActiveReview | undefined {
 	const revdiffBin = resolveRevdiffBin();
 	if (!revdiffBin) {
 		ctx.ui.notify("revdiff binary not found. Install it or set REVDIFF_BIN.", "error");
 		return undefined;
 	}
+	const tmuxBin = findInPath("tmux");
+	if (!process.env.TMUX || !process.env.TMUX_PANE || !tmuxBin) {
+		ctx.ui.notify("The side-by-side revdiff workflow requires pi to run inside tmux.", "error");
+		return undefined;
+	}
 
 	const tempDir = mkdtempSync(path.join(tmpdir(), "revdiff-pi-"));
 	const outputFile = path.join(tempDir, "annotations.txt");
+	const sentinelFile = path.join(tempDir, "exit-code");
+	const launcherFile = path.join(tempDir, "launch.sh");
 	const commandArgs = [...launch.args, `--output=${outputFile}`];
-	let launchError = "";
-	let launchSignal = "";
+	const reviewEnv = withPiReviewEnv(process.env);
+	writeFileSync(
+		launcherFile,
+		[
+			"#!/bin/sh",
+			`cd ${shellQuote(cwd)} || exit 1`,
+			"rc=0",
+			`${EXIT_CODE_ON_ANNOTATIONS_ENV}=${shellQuote(reviewEnv[EXIT_CODE_ON_ANNOTATIONS_ENV] ?? "true")} ${LINE_NUMBERS_ENV}=${shellQuote(reviewEnv[LINE_NUMBERS_ENV] ?? "true")} ${shellJoin([revdiffBin, ...commandArgs])} || rc=$?`,
+			`printf '%s' "$rc" > ${shellQuote(`${sentinelFile}.tmp`)} && mv -f ${shellQuote(`${sentinelFile}.tmp`)} ${shellQuote(sentinelFile)}`,
+			'exit "$rc"',
+			"",
+		].join("\n"),
+		{ mode: 0o700 },
+	);
 
-	const exitCode = await ctx.ui.custom<number | null>((tui, _theme, _kb, done) => {
-		tui.stop();
-		process.stdout.write("\x1b[2J\x1b[H");
-		const result = spawnSync(revdiffBin, commandArgs, {
-			cwd,
-			env: withAnnotationExitCode(process.env),
-			stdio: "inherit",
-		});
-		if (result.error) {
-			launchError = result.error.message;
-		}
-		if (result.signal) {
-			launchSignal = result.signal;
-		}
-		tui.start();
-		tui.requestRender(true);
-		done(result.status ?? 1);
-		return { render: () => [], invalidate() {} };
-	});
-
-	const outputExists = existsSync(outputFile);
-	const rawOutput = outputExists ? readFileSync(outputFile, "utf8").trim() : "";
+	let watcher: FSWatcher;
 	try {
+		watcher = watch(tempDir);
+	} catch (error) {
 		rmSync(tempDir, { recursive: true, force: true });
-	} catch {
-		// ignore temp cleanup failures
-	}
-
-	if (launchError) {
-		ctx.ui.notify(`Failed to launch revdiff: ${launchError}`, "error");
-		return undefined;
-	}
-	if (launchSignal) {
-		ctx.ui.notify(`revdiff terminated by signal ${launchSignal}`, "warning");
-		return undefined;
-	}
-	if (typeof exitCode !== "number") {
-		ctx.ui.notify("revdiff review did not complete", "warning");
-		return undefined;
-	}
-	if (!isRevdiffSuccess(exitCode)) {
-		ctx.ui.notify(`revdiff exited with code ${exitCode}`, "warning");
-		return undefined;
-	}
-	if (!outputExists && exitCode === EXIT_CODE_ANNOTATIONS) {
-		ctx.ui.notify("revdiff reported annotations without writing output", "warning");
+		ctx.ui.notify(`Failed to watch revdiff annotations: ${error instanceof Error ? error.message : String(error)}`, "error");
 		return undefined;
 	}
 
-	return buildResult(launch, rawOutput, cwd);
-}
+	const split = spawnSync(
+		tmuxBin,
+		[
+			"split-window",
+			"-h",
+			"-l",
+			"50%",
+			"-P",
+			"-F",
+			"#{pane_id}",
+			"-t",
+			process.env.TMUX_PANE,
+			"-c",
+			cwd,
+			shellJoin([launcherFile]),
+		],
+		{ encoding: "utf8", env: process.env },
+	);
+	const paneId = split.stdout.trim();
+	if (split.error || split.status !== 0 || !paneId) {
+		watcher.close();
+		rmSync(tempDir, { recursive: true, force: true });
+		ctx.ui.notify(`Failed to open revdiff pane: ${split.error?.message ?? (split.stderr.trim() || `tmux exited ${split.status}`)}`, "error");
+		return undefined;
+	}
 
-function buildResult(launch: LaunchSpec, rawOutput: string, cwd: string): ReviewResult {
+	ctx.ui.notify(`Opened revdiff for ${launch.label}. Press O to send annotations to pi.`, "info");
 	return {
-		args: [...launch.args],
-		argsText: shellJoin(launch.args),
-		cwd,
 		label: launch.label,
-		rawOutput,
-		annotations: parseAnnotations(rawOutput),
+		lastOutput: "",
+		outputFile,
+		paneId,
+		sentinelFile,
+		tempDir,
+		tmuxBin,
+		watcher,
 	};
 }
 
-// request exit code 10 via env, not a CLI flag: an old revdiff binary silently
-// ignores an unknown env var but hard-fails on an unknown flag
-function withAnnotationExitCode(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-	return { ...env, [EXIT_CODE_ON_ANNOTATIONS_ENV]: "true" };
+function tmuxPaneExists(review: ActiveReview): boolean {
+	return spawnSync(review.tmuxBin, ["display-message", "-p", "-t", review.paneId, "#{pane_id}"], {
+		env: process.env,
+		stdio: "ignore",
+	}).status === 0;
+}
+
+function focusTmuxPane(review: ActiveReview): boolean {
+	if (!tmuxPaneExists(review)) {
+		return false;
+	}
+	return spawnSync(review.tmuxBin, ["select-pane", "-t", review.paneId], { env: process.env, stdio: "ignore" }).status === 0;
+}
+
+// use env instead of CLI flags so old revdiff binaries ignore unsupported options;
+// preserve an explicit line-number preference inherited from pi
+function withPiReviewEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+	return {
+		...env,
+		[EXIT_CODE_ON_ANNOTATIONS_ENV]: "true",
+		[LINE_NUMBERS_ENV]: env[LINE_NUMBERS_ENV] ?? "true",
+	};
 }
 
 function isRevdiffSuccess(exitCode: number): boolean {
@@ -492,11 +564,6 @@ function shellSplit(input: string): string[] {
 
 function shellJoin(args: string[]): string {
 	return args.map(shellQuote).join(" ");
-}
-
-function commandText(args: string[]): string {
-	const argsText = shellJoin(args);
-	return argsText ? `revdiff ${argsText}` : "revdiff";
 }
 
 function shellQuote(arg: string): string {

@@ -4,9 +4,10 @@ This directory contains the **pi-specific** integration for revdiff.
 
 ## Contents
 
-- `extensions/revdiff.ts` — pi extension that routes `/revdiff` through the skill, launches revdiff with `REVDIFF_EXIT_CODE_ON_ANNOTATIONS` set, captures annotations, treats exit `10` as success-with-annotations, and exposes the `revdiff_review` agent tool
-- `skills/revdiff/SKILL.md` — pi skill describing the review workflow and command
+- `extensions/revdiff.ts` — registers the user-only `/diff` command, opens revdiff in a right-side tmux pane, and sends flushed annotations to pi
 - `scripts/detect-ref.sh` — packaged smart-target detection script used by the extension
+
+The integration does not register a model tool or skill. Only an explicit `/diff` command can launch revdiff, and revdiff is not reopened after pi handles annotations.
 
 ## Install
 
@@ -16,61 +17,45 @@ From the repo root:
 pi install https://github.com/umputun/revdiff
 ```
 
-The root `package.json` includes these resources in the package:
-
-- `plugins/pi/extensions`
-- `plugins/pi/skills`
-- `plugins/pi/scripts`
+The root `package.json` includes the extension and detection script under `plugins/pi/`.
 
 ## Usage
 
-The pi package exposes one user command:
-
 ```text
-/revdiff [args]
+/diff [args]
 ```
 
-`/revdiff` routes requests through `/skill:revdiff`. The skill resolves refs, files, and natural-language targets before calling the `revdiff_review` tool. The tool launches the external `revdiff` binary through direct terminal handoff. pi temporarily suspends, revdiff takes over the terminal, and pi resumes when revdiff exits. If no annotations were captured, the agent stops the review loop unless you explicitly ask for another review.
-
-The agent uses the `revdiff_review` tool for the review loop after handling annotations. The loop is: classify annotations, answer explanation requests first in normal chat, ask whether to continue or finish after explanation-only annotations, stop after any no-annotation result, list planned code changes for code-change directives, edit files, and rerun `revdiff_review` with the same args only after repository files changed or when the user asks to continue reviewing.
-
-Useful args:
+With no arguments, `/diff` detects uncommitted, staged, or branch changes. Arguments are passed through as revdiff arguments after shell-like splitting.
 
 ```text
-/revdiff                         -- detect uncommitted, staged, or branch changes, then open revdiff
-/revdiff HEAD~1                  -- review last commit
-/revdiff main                    -- review against main
-/revdiff --staged                -- review staged changes
-/revdiff --untracked             -- include untracked files in working-tree review
-/revdiff --all-files             -- browse all tracked files
-/revdiff --all-files --exclude vendor
-/revdiff --only README.md        -- review a single file in context-only mode
-/revdiff HEAD~3 --description="why this refactor matters"
-/revdiff HEAD~3 --description-file=/tmp/revdiff-desc.md
-/revdiff main --annotations=/tmp/revdiff-review.md
+/diff
+/diff HEAD~1
+/diff main
+/diff --staged
+/diff --untracked
+/diff --all-files
+/diff --all-files --exclude vendor
+/diff --only README.md
+/diff HEAD~3 --description="why this refactor matters"
+/diff HEAD~3 --description-file=/tmp/revdiff-desc.md
+/diff main --annotations=/tmp/revdiff-review.md
 ```
 
-Natural-language targets are supported because `/revdiff` routes through the skill:
+Press `O` in revdiff to send the current annotation snapshot to pi without closing the review. After pi edits the code, press `R` to reload the diff. Quitting revdiff sends any final snapshot that was not already delivered. Running `/diff` while the review pane is open focuses that pane instead of starting another review.
 
-```text
-/revdiff prev commit
-/revdiff last tag
-/revdiff 2 weeks ago
-```
-
-You can also call the skill explicitly with `/skill:revdiff <request>`.
+The model cannot launch or reopen revdiff; only the user can start or focus it with `/diff`.
 
 ## Notes
 
+- Requires pi to run inside tmux
 - Requires the `revdiff` binary on `PATH`
 - Set `REVDIFF_BIN=/absolute/path/to/revdiff` if pi cannot find the binary
-- Direct terminal handoff is the only Pi launch mode
+- Line numbers are enabled by default; set `REVDIFF_LINE_NUMBERS=false` before starting pi to disable them
+- The review opens in a 50% pane to the right of pi
 - Exit code `10` means annotations were captured, not failure
-- Use `--untracked` when agent-created files should be reviewed before they are staged
-- Use `--description` or `--description-file` after analysis/refactor work so the info popup carries review context
-- Use `--annotations=<tempfile>` to preload in-session review notes
-- Successful `revdiff_review` results include captured annotation text; history is only for explicit latest-history requests or missing-output fallback
-- In the repo, the pi-specific resources live under `plugins/pi/` to keep harness integrations clearly separated
+- Use `--untracked` when new untracked files should be included
+- Use `--description` or `--description-file` so the info popup carries review context
+- Use `--annotations=<tempfile>` to preload review notes
 
 This integration is intentionally kept separate from other harnesses:
 
