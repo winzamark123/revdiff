@@ -24,6 +24,7 @@
 //     source-file opening, source-editor completion, and clean-exit refresh policy
 //   - themeselect.go — theme selector operations: open, preview/confirm/cancel, apply theme
 //     (delegates to injected [ThemeCatalog] for discovery and persistence)
+//   - filepicker.go — file picker open and selected-path jump integration
 //   - search.go — incremental search: input handling, match computation, navigation
 //
 // Model mutable state is organized into explicit sub-structs by concern:
@@ -58,7 +59,7 @@
 // (styleResolver, styleRenderer, sgrProcessor) defined in model.go; concrete
 // implementations live in the style sub-package.
 //
-// Left-pane navigation components live in the [sidepane] sub-package (app/ui/sidepane/).
+// Navigation-pane components live in the [sidepane] sub-package (app/ui/sidepane/).
 // It owns the file tree (FileTree) and markdown table-of-contents (TOC) types,
 // including cursor/offset management, entry parsing, and rendering logic.
 // Model holds sidepane types through consumer-side interfaces (FileTreeComponent,
@@ -66,7 +67,7 @@
 // ModelConfig.NewFileTree and ModelConfig.ParseTOC factory closures wired in app/main.go.
 //
 // Layered popup UI lives in the [overlay] sub-package (app/ui/overlay/).
-// It owns help, annotation list, and theme selector overlays — all popup state
+// It owns help, annotation list, theme selector, and file picker overlays — all popup state
 // (cursor, offset, filter text, items, active kind), rendering (box layout,
 // item formatting, border title injection, ANSI-aware centered compositing),
 // and key dispatch (navigation, confirm, cancel, filter input). A Manager

@@ -21,6 +21,7 @@ func TestParseArgs_Defaults(t *testing.T) {
 	opts, err := parseArgs(noConfigArgs(t))
 	require.NoError(t, err)
 	assert.Equal(t, 2, opts.TreeWidth)
+	assert.Equal(t, "left", opts.TreePosition)
 	assert.Equal(t, 4, opts.TabWidth)
 	assert.Equal(t, "catppuccin-macchiato", opts.ChromaStyle)
 	assert.Equal(t, "💬", opts.AnnotationMarker)
@@ -30,21 +31,54 @@ func TestParseArgs_Defaults(t *testing.T) {
 	assert.False(t, opts.NoConfirmDiscard)
 	assert.False(t, opts.NoConfirmReload)
 	assert.False(t, opts.NoMouse)
+	assert.False(t, opts.NoTree)
 	assert.False(t, opts.Wrap)
 	assert.False(t, opts.Collapsed)
 	assert.False(t, opts.Compact)
 	assert.Equal(t, 5, opts.CompactContext)
 	assert.False(t, opts.CrossFileHunks)
+	assert.False(t, opts.StartAtChange)
 	assert.False(t, opts.LineNumbers)
 	assert.False(t, opts.Blame)
 	assert.False(t, opts.ExitCodeOnAnnotations)
 	assert.False(t, opts.Stdin)
 	assert.Empty(t, opts.Output)
+	assert.Empty(t, opts.PostFlushCommand)
 	assert.Empty(t, opts.StdinName)
 	assert.Empty(t, opts.Refs.Base)
 	assert.Empty(t, opts.Refs.Against)
 	assert.Equal(t, "revdiff", opts.AutoThemeDark)
 	assert.Equal(t, "catppuccin-latte", opts.AutoThemeLight)
+}
+
+func TestParseArgs_TreePosition(t *testing.T) {
+	t.Run("flag", func(t *testing.T) {
+		opts, err := parseArgs(append(noConfigArgs(t), "--tree-position=right"))
+		require.NoError(t, err)
+		assert.Equal(t, "right", opts.TreePosition)
+	})
+
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("REVDIFF_TREE_POSITION", "right")
+		opts, err := parseArgs(noConfigArgs(t))
+		require.NoError(t, err)
+		assert.Equal(t, "right", opts.TreePosition)
+	})
+
+	t.Run("config file", func(t *testing.T) {
+		cfgPath := filepath.Join(t.TempDir(), "config")
+		err := os.WriteFile(cfgPath, []byte("[Application Options]\ntree-position = right\n"), 0o600)
+		require.NoError(t, err)
+
+		opts, err := parseArgs([]string{"--config", cfgPath})
+		require.NoError(t, err)
+		assert.Equal(t, "right", opts.TreePosition)
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		_, err := parseArgs(append(noConfigArgs(t), "--tree-position=center"))
+		require.Error(t, err)
+	})
 }
 
 func TestParseArgs_NoConfirmDiscard(t *testing.T) {
@@ -119,6 +153,72 @@ func TestParseArgs_NoMouse(t *testing.T) {
 		opts, err := parseArgs([]string{"--config", cfgPath})
 		require.NoError(t, err)
 		assert.True(t, opts.NoMouse)
+	})
+}
+
+func TestParseArgs_NoTree(t *testing.T) {
+	t.Run("flag", func(t *testing.T) {
+		opts, err := parseArgs(append(noConfigArgs(t), "--no-tree"))
+		require.NoError(t, err)
+		assert.True(t, opts.NoTree)
+	})
+
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("REVDIFF_NO_TREE", "true")
+		opts, err := parseArgs(noConfigArgs(t))
+		require.NoError(t, err)
+		assert.True(t, opts.NoTree)
+	})
+
+	t.Run("config file", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "config")
+		err := os.WriteFile(cfgPath, []byte("[Application Options]\nno-tree = true\n"), 0o600)
+		require.NoError(t, err)
+		opts, err := parseArgs([]string{"--config", cfgPath})
+		require.NoError(t, err)
+		assert.True(t, opts.NoTree)
+	})
+}
+
+func TestParseArgs_PageOverlap(t *testing.T) {
+	t.Run("default is zero", func(t *testing.T) {
+		opts, err := parseArgs(noConfigArgs(t))
+		require.NoError(t, err)
+		assert.Equal(t, 0, opts.PageOverlap)
+	})
+
+	t.Run("flag", func(t *testing.T) {
+		opts, err := parseArgs(append(noConfigArgs(t), "--page-overlap", "2"))
+		require.NoError(t, err)
+		assert.Equal(t, 2, opts.PageOverlap)
+	})
+
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("REVDIFF_PAGE_OVERLAP", "3")
+		opts, err := parseArgs(noConfigArgs(t))
+		require.NoError(t, err)
+		assert.Equal(t, 3, opts.PageOverlap)
+	})
+
+	t.Run("config file", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "config")
+		err := os.WriteFile(cfgPath, []byte("[Application Options]\npage-overlap = 4\n"), 0o600)
+		require.NoError(t, err)
+		opts, err := parseArgs([]string{"--config", cfgPath})
+		require.NoError(t, err)
+		assert.Equal(t, 4, opts.PageOverlap)
+	})
+
+	t.Run("flag overrides config file", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "config")
+		err := os.WriteFile(cfgPath, []byte("[Application Options]\npage-overlap = 4\n"), 0o600)
+		require.NoError(t, err)
+		opts, err := parseArgs([]string{"--config", cfgPath, "--page-overlap", "1"})
+		require.NoError(t, err)
+		assert.Equal(t, 1, opts.PageOverlap)
 	})
 }
 
@@ -300,6 +400,31 @@ func TestParseArgs_CrossFileHunks(t *testing.T) {
 		opts, err := parseArgs([]string{"--config", cfgPath})
 		require.NoError(t, err)
 		assert.True(t, opts.CrossFileHunks)
+	})
+}
+
+func TestParseArgs_StartAtChange(t *testing.T) {
+	t.Run("flag", func(t *testing.T) {
+		opts, err := parseArgs(append(noConfigArgs(t), "--start-at-change"))
+		require.NoError(t, err)
+		assert.True(t, opts.StartAtChange)
+	})
+
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("REVDIFF_START_AT_CHANGE", "true")
+		opts, err := parseArgs(noConfigArgs(t))
+		require.NoError(t, err)
+		assert.True(t, opts.StartAtChange)
+	})
+
+	t.Run("config file", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "config")
+		err := os.WriteFile(cfgPath, []byte("[Application Options]\nstart-at-change = true\n"), 0o600)
+		require.NoError(t, err)
+		opts, err := parseArgs([]string{"--config", cfgPath})
+		require.NoError(t, err)
+		assert.True(t, opts.StartAtChange)
 	})
 }
 
@@ -574,6 +699,39 @@ func TestParseArgs_OutputFlag(t *testing.T) {
 	assert.Equal(t, "/tmp/out2.txt", opts.Output)
 }
 
+func TestParseArgs_PostFlushCommand(t *testing.T) {
+	t.Run("flag", func(t *testing.T) {
+		opts, err := parseArgs(append(noConfigArgs(t), "--post-flush-command", "osc-copy"))
+		require.NoError(t, err)
+		assert.Equal(t, "osc-copy", opts.PostFlushCommand)
+	})
+
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("REVDIFF_POST_FLUSH_COMMAND", "osc-copy")
+		opts, err := parseArgs(noConfigArgs(t))
+		require.NoError(t, err)
+		assert.Equal(t, "osc-copy", opts.PostFlushCommand)
+	})
+
+	t.Run("custom config file", func(t *testing.T) {
+		cfgPath := filepath.Join(t.TempDir(), "custom.ini")
+		err := os.WriteFile(cfgPath, []byte("[Application Options]\npost-flush-command = osc-copy\n"), 0o600)
+		require.NoError(t, err)
+		opts, err := parseArgs([]string{"--config", cfgPath})
+		require.NoError(t, err)
+		assert.Equal(t, "osc-copy", opts.PostFlushCommand)
+	})
+
+	t.Run("cli overrides custom config", func(t *testing.T) {
+		cfgPath := filepath.Join(t.TempDir(), "custom.ini")
+		err := os.WriteFile(cfgPath, []byte("[Application Options]\npost-flush-command = config-hook\n"), 0o600)
+		require.NoError(t, err)
+		opts, err := parseArgs([]string{"--config", cfgPath, "--post-flush-command", "cli-hook"})
+		require.NoError(t, err)
+		assert.Equal(t, "cli-hook", opts.PostFlushCommand)
+	})
+}
+
 func TestParseArgs_Flags(t *testing.T) {
 	opts, err := parseArgs([]string{"--staged", "--tree-width=5", "--tab-width=8", "--no-colors", "--chroma-style=dracula", "HEAD~3"})
 	require.NoError(t, err)
@@ -821,10 +979,12 @@ func TestDumpConfig(t *testing.T) {
 
 	assert.Contains(t, output, "[Application Options]")
 	assert.Contains(t, output, "chroma-style = catppuccin-macchiato")
+	assert.Contains(t, output, "tree-position = left")
 	assert.Contains(t, output, "cross-file-hunks = false")
 	assert.Contains(t, output, "exit-code-on-annotations = false")
 	assert.Contains(t, output, "no-mouse = false")
 	assert.Contains(t, output, "wrap-indent = 0")
+	assert.Contains(t, output, "post-flush-command =")
 	assert.Contains(t, output, "[color options]")
 	assert.Contains(t, output, "color-accent = #D5895F")
 	assert.NotContains(t, output, "\ncolors =", "should not have spurious colors= line")

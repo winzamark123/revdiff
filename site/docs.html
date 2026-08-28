@@ -289,7 +289,7 @@ revdiff HEAD~3 --description-file=.review-description.md</code></div>
         <p><code>--description</code> and <code>--description-file</code> are mutually exclusive. The description section is hidden when neither is set, so the flag is purely additive.</p>
 
         <h2 id="markdown-toc">Markdown TOC navigation</h2>
-        <p>When reviewing a single markdown file in context-only mode, a table-of-contents pane appears on the left listing all markdown headers. This works for <code>--only</code> files and for <code>--stdin</code> when <code>--stdin-name</code> ends with <code>.md</code> or <code>.markdown</code>. Use <code>Tab</code> to switch focus, <code>j</code>/<code>k</code> to navigate, <code>Enter</code> to jump. The TOC highlights the current section as you scroll. Headers inside fenced code blocks are excluded.</p>
+        <p>When reviewing a single markdown file in context-only mode, a table-of-contents pane appears on the configured side listing all markdown headers. This works for <code>--only</code> files and for <code>--stdin</code> when <code>--stdin-name</code> ends with <code>.md</code> or <code>.markdown</code>. Use <code>Tab</code> to switch focus, <code>j</code>/<code>k</code> to navigate, <code>Enter</code> to jump. The TOC highlights the current section as you scroll. Headers inside fenced code blocks are excluded.</p>
 
         <h2 id="beyond-code-review">Beyond code review</h2>
         <p>The <code>--only</code> and <code>--stdin</code> flags enable use cases beyond git diffs. Files and ephemeral command output can both be loaded for annotation, no git repo required.</p>
@@ -396,15 +396,18 @@ revdiff --dump-config > ~/.config/revdiff/config</code></div>
                 <tr><td><code>--staged</code></td><td>Show staged changes</td><td><code>false</code></td></tr>
                 <tr><td><code>--untracked</code></td><td>Show untracked files in the tree</td><td><code>false</code></td></tr>
                 <tr><td><code>--tree-width</code></td><td>File tree width in units (1-10)</td><td><code>2</code></td></tr>
+                <tr><td><code>--tree-position</code></td><td>File tree and markdown TOC position (<code>left</code> or <code>right</code>)</td><td><code>left</code></td></tr>
                 <tr><td><code>--tab-width</code></td><td>Spaces per tab character</td><td><code>4</code></td></tr>
                 <tr><td><code>--no-colors</code></td><td>Disable all colors</td><td><code>false</code></td></tr>
                 <tr><td><code>--no-status-bar</code></td><td>Hide the status bar</td><td><code>false</code></td></tr>
                 <tr><td><code>--wrap</code></td><td>Enable line wrapping</td><td><code>false</code></td></tr>
                 <tr><td><code>--wrap-indent</code></td><td>Indent wrap continuation rows by N columns so they hang under the first row's content</td><td><code>0</code></td></tr>
+                <tr><td><code>--page-overlap</code></td><td>Keep N lines from the previous screen when paging the diff</td><td><code>0</code></td></tr>
                 <tr><td><code>--collapsed</code></td><td>Start in collapsed diff mode</td><td><code>false</code></td></tr>
                 <tr><td><code>--compact</code></td><td>Start in compact diff mode (small context around changes)</td><td><code>false</code></td></tr>
                 <tr><td><code>--compact-context</code></td><td>Number of context lines around changes when in compact mode</td><td><code>5</code></td></tr>
                 <tr><td><code>--cross-file-hunks</code></td><td>Allow <code>[</code> and <code>]</code> to continue into adjacent files</td><td><code>false</code></td></tr>
+                <tr><td><code>--start-at-change</code></td><td>Position the cursor on the first changed line</td><td><code>false</code></td></tr>
                 <tr><td><code>--line-numbers</code></td><td>Show line numbers in diff gutter</td><td><code>false</code></td></tr>
                 <tr><td><code>--word-diff</code></td><td>Highlight intra-line word-level changes in paired add/remove lines</td><td><code>false</code></td></tr>
                 <tr><td><code>--annotation-marker</code></td><td>Prefix shown before annotation lines</td><td><code>💬</code></td></tr>
@@ -412,6 +415,7 @@ revdiff --dump-config > ~/.config/revdiff/config</code></div>
                 <tr><td><code>--no-confirm-discard</code></td><td>Skip discard confirmation</td><td><code>false</code></td></tr>
                 <tr><td><code>--no-confirm-reload</code></td><td>Skip reload confirmation</td><td><code>false</code></td></tr>
                 <tr><td><code>--no-mouse</code></td><td>Disable mouse support (scroll wheel, click)</td><td><code>false</code></td></tr>
+                <tr><td><code>--no-tree</code></td><td>Hide the file tree pane</td><td><code>false</code></td></tr>
                 <tr><td><code>--vim-motion</code></td><td>Enable vim-style motion preset (counts, <code>gg</code>, <code>G</code>, <code>H</code>/<code>M</code>/<code>L</code>, <code>zz</code>/<code>zt</code>/<code>zb</code>, <code>ZZ</code>/<code>ZQ</code>)</td><td><code>false</code></td></tr>
                 <tr><td><code>--chroma-style</code></td><td>Syntax highlighting theme</td><td><code>catppuccin-macchiato</code></td></tr>
                 <tr><td><code>--theme</code></td><td>Load color theme from <code>~/.config/revdiff/themes/</code>; use <code>auto</code> to choose by terminal background</td><td></td></tr>
@@ -433,6 +437,7 @@ revdiff --dump-config > ~/.config/revdiff/config</code></div>
                 <tr><td><code>-X, --exclude</code></td><td>Exclude files by prefix (repeatable)</td><td></td></tr>
                 <tr><td><code>-F, --only</code></td><td>Show only matching files</td><td></td></tr>
                 <tr><td><code>-o, --output</code></td><td>Write annotations to file</td><td></td></tr>
+                <tr><td><code>--post-flush-command</code></td><td>Run command after a successful <code>O</code> flush (requires <code>-o</code>/<code>--output</code>)</td><td></td></tr>
                 <tr><td><code>--annotations</code></td><td>Preload annotations from a markdown file in <code>-o</code> format</td><td></td></tr>
                 <tr><td><code>--history-dir</code></td><td>Directory for review history auto-saves</td><td><code>~/.config/revdiff/history/</code></td></tr>
                 <tr><td><code>--keys</code></td><td>Path to keybindings file</td><td><code>~/.config/revdiff/keybindings</code></td></tr>
@@ -522,10 +527,12 @@ color-border = #6272a4
                 <tr><td><code>Home/End</code></td><td>Jump to first/last item</td></tr>
                 <tr><td><code>Enter</code></td><td>Switch to diff (tree) / annotate (diff)</td></tr>
                 <tr><td><code>n/p</code></td><td>Next/prev changed file or TOC header</td></tr>
+                <tr><td><code>P</code></td><td>Open the file picker</td></tr>
                 <tr><td><code>[</code> / <code>]</code></td><td>Jump to prev/next change hunk; with <code>--cross-file-hunks</code>, continues to prev/next file at the boundary</td></tr>
                 <tr><td><code>e</code></td><td>Open focused file in <code>$EDITOR</code></td></tr>
             </tbody>
         </table>
+        <p>The file picker lists paths currently visible in the sidebar, so annotated-only and unreviewed-only filters remain active. Printable keys always filter full relative paths; use the arrow keys or mouse wheel to move, and press <code>Enter</code> or left-click to jump. <code>Backspace</code> edits the filter. The first <code>Esc</code> clears a non-empty filter and keeps the picker open; the second closes it. Because printable keys always filter, <code>P</code> typed inside the picker adds to the filter rather than closing it; a <code>jump_file</code> binding with a modifier (e.g. <code>map alt+f jump_file</code>) closes the picker when pressed again.</p>
 
         <h2 id="search">Search</h2>
         <table>
@@ -557,6 +564,12 @@ color-border = #6272a4
         <p>While the annotation input is active, press <code>Ctrl+E</code> (or whatever key is bound to <code>open_editor</code>) to hand off the current text to an external editor for multi-line comments. Editor resolution: <code>$EDITOR</code> &rarr; <code>$VISUAL</code> &rarr; <code>vi</code>. Values with arguments work (e.g. <code>EDITOR="code --wait"</code>). On editor save and quit, the full file contents (including newlines) become the annotation. Quitting the editor with an empty file cancels the annotation and preserves any previously stored note on that line. Multi-line annotations are rendered line-by-line in the diff view, shown flattened in the annotation list popup (<code>@</code>), and emitted with embedded newlines in the structured output.</p>
         <p>Press <code>e</code> in the diff pane to open the focused file in <code>$EDITOR</code> (<code>open_file_in_editor</code> &mdash; rebindable) when revdiff has a stable source path. Editor resolution is the same <code>$EDITOR</code> &rarr; <code>$VISUAL</code> &rarr; <code>vi</code> chain. Known editors receive either <code>$EDITOR +N path</code> or <code>$EDITOR --goto path:N</code> as appropriate; unknown editors receive only the file path. File lines are resolved on a best-effort basis. For working tree changes, a clean editor exit reloads the displayed file. For <code>--staged</code> or refs, a clean editor exit returns to revdiff without reloading the displayed diff. In compare mode, <code>e</code> opens the <code>--compare-new</code> side. Working tree files with line annotations cannot be opened for editing because edits can orphan those annotations. Diffs read with <code>--stdin</code> do not support opening files. Unsupported rows or files and editor errors show a status hint instead of launching an editor or changing the diff.</p>
         <p>Press <code>O</code> to write the current annotations to the <code>--output</code> file without exiting (<code>flush_output</code> &mdash; rebindable). This keeps revdiff open while handing the file to an AI agent: annotate, flush with <code>O</code>, let the agent read the file and edit code, then reload with <code>R</code> and continue in the same session. Each flush overwrites the file with the full current annotation set (a snapshot, not an append log), using the same atomic write as a normal quit. <code>O</code> requires <code>-o</code>/<code>--output</code>; with no output file, or with no annotations yet, it shows a status hint and writes nothing.</p>
+        <p>One possible use is copying annotations to the terminal clipboard after every flush with OSC 52. revdiff does not include an OSC 52 helper; create an <code>osc-copy</code> shell script on your <code>PATH</code> that reads stdin and writes the clipboard sequence to <code>/dev/tty</code>:</p>
+        <div class="code-block"><code>#!/bin/sh
+data=$(base64 | tr -d '\n')
+printf '\033]52;c;%s\007' "$data" > /dev/tty</code></div>
+        <p>After making the script executable, run revdiff with <code>--post-flush-command=osc-copy</code> or set <code>post-flush-command = osc-copy</code> in the config file.</p>
+        <p>The post-flush command runs synchronously. Use a fast, non-interactive command because revdiff waits for it to finish before restoring the TUI.</p>
         <p>Press <code>Space</code> to mark the focused file reviewed. On <code>R</code> reload, revdiff keeps the mark only when the file's effective text diff is unchanged; rebases that only shift line numbers or surrounding context keep it, while changed or removed files lose it. Binary files and opaque placeholders are conservatively unmarked on reload because their rendered diff does not expose enough content to prove they are unchanged.</p>
 
         <h2 id="view">View toggles</h2>
@@ -609,15 +622,18 @@ color-border = #6272a4
             <li><strong>Left-click in the tree</strong> &mdash; focuses the tree and selects/loads the clicked entry (same as pressing <code>j</code>/<code>k</code> to land there). Clicking a directory row moves the cursor but does not load a file.</li>
             <li><strong>Left-click in the diff</strong> &mdash; focuses the diff and moves the cursor to the clicked line. Enables a &ldquo;click, then <code>a</code>&rdquo; annotation flow.</li>
             <li><strong>Left-click in the TOC pane</strong> (single-file markdown) &mdash; focuses the TOC and selects the clicked header.</li>
-            <li><strong>Scroll wheel in overlay popups</strong> (info, annotations, themes) &mdash; scrolls the popup content or moves its cursor. Shift+wheel uses a half-page step. In the theme selector, wheel previews each theme live. Help overlay has no scrollable or selectable content so mouse events are ignored.</li>
+            <li><strong>Scroll wheel in overlay popups</strong> (info, annotations, themes, help) &mdash; scrolls the popup content or moves its cursor. Shift+wheel uses a half-page step. In the theme selector, wheel previews each theme live.</li>
             <li><strong>Left-click in the annotation popup</strong> &mdash; jumps to the clicked annotation (same as pressing <code>Enter</code>).</li>
             <li><strong>Left-click in the theme popup</strong> &mdash; confirms the clicked theme (same as pressing <code>Enter</code>). Clicks on the filter row or blank separator are ignored.</li>
+            <li><strong>Left-click in the file picker</strong> &mdash; jumps to the clicked file (same as pressing <code>Enter</code>). Clicks on the filter row or blank separator are ignored.</li>
+            <li><strong>Scroll wheel in the file picker</strong> &mdash; moves the picker cursor. Shift+wheel uses a half-page step.</li>
         </ul>
         <p>Horizontal wheel, right-click, middle-click, drag selection, and clicks on the status bar or diff header are intentionally ignored. Clicks outside an open overlay are swallowed &mdash; dismiss an overlay with <code>Esc</code> or its toggle key. Modal states (annotation input, search input, confirm discard, reload confirm) swallow mouse events entirely.</p>
         <p><strong>Text selection trade-off</strong> &mdash; once mouse tracking is on, plain drag is captured by revdiff. For terminal-native text selection:</p>
         <ul>
             <li><strong>kitty</strong>: hold <code>Ctrl+Shift</code> while dragging</li>
             <li><strong>iTerm2</strong>: hold <code>Option</code> while dragging</li>
+            <li><strong>ghostty</strong> (and ghostty-based terminals such as agterm): hold <code>Shift</code> while dragging. Ghostty also uses <code>Shift</code> to <em>extend</em> an existing selection, so if text is already selected the drag grows that selection instead of starting a new one &mdash; clear it first. Ghostty 1.3.0+ additionally has a <code>toggle_mouse_reporting</code> keybind, unbound by default, which suspends mouse capture without restarting revdiff</li>
             <li><strong>most other terminals</strong>: hold <code>Shift</code> while dragging</li>
         </ul>
         <p>Because the tree pane is rendered alongside the diff on the same rows, multi-line Shift+drag will include tree content. For clean copies of diff text, use your terminal's block-select mode (Option+drag in iTerm2, Ctrl+Shift+drag in kitty) or run with <code>--no-mouse</code> to disable mouse capture entirely.</p>
@@ -640,8 +656,8 @@ map alt+t&gt;n theme_select</code></div>
         <p><strong>macOS note:</strong> <code>alt+*</code> leaders require your terminal to send Option as Meta/Alt. Most terminals default to &quot;Option composes special characters&quot; (e.g. <code>Option+T</code> &rarr; <code>&dagger;</code>), in which case Alt chords silently won&apos;t fire. To enable: iTerm2 &rarr; <em>Profiles &rarr; Keys &rarr; Left/Right Option key &rarr; <code>Esc+</code></em>; Terminal.app &rarr; <em>Profiles &rarr; Keyboard &rarr; Use Option as Meta key</em>; Kitty &rarr; <code>macos_option_as_alt yes</code>; Ghostty &rarr; <code>macos-option-as-alt = true</code>. If you&apos;d rather not touch terminal settings, use <code>ctrl+*</code> leaders &mdash; those work everywhere with no configuration.</p>
         <h3>Available actions</h3>
         <p><strong>Navigation:</strong> <code>down</code>, <code>up</code>, <code>page_down</code>, <code>page_up</code>, <code>half_page_down</code>, <code>half_page_up</code>, <code>home</code>, <code>end</code>, <code>scroll_left</code>, <code>scroll_right</code>, <code>scroll_center</code>, <code>scroll_top</code>, <code>scroll_bottom</code>, <code>scroll_diff_down</code>, <code>scroll_diff_up</code></p>
-        <p><strong>File/Hunk:</strong> <code>next_item</code>, <code>prev_item</code>, <code>next_hunk</code>, <code>prev_hunk</code>, <code>open_file_in_editor</code></p>
-        <p><strong>Pane:</strong> <code>toggle_pane</code>, <code>focus_tree</code>, <code>focus_diff</code></p>
+        <p><strong>File/Hunk:</strong> <code>next_item</code>, <code>prev_item</code>, <code>jump_file</code>, <code>next_hunk</code>, <code>prev_hunk</code>, <code>open_file_in_editor</code></p>
+        <p><strong>Pane:</strong> <code>toggle_pane</code>, <code>focus_left</code>, <code>focus_right</code>, <code>focus_tree</code>, <code>focus_diff</code></p>
         <p><strong>Search:</strong> <code>search</code></p>
         <p><strong>Annotations:</strong> <code>confirm</code>, <code>annotate_file</code>, <code>delete_annotation</code>, <code>annot_list</code>, <code>open_editor</code>, <code>next_annotation</code>, <code>prev_annotation</code>, <code>flush_output</code></p>
         <p><strong>View:</strong> <code>toggle_collapsed</code>, <code>toggle_compact</code>, <code>toggle_wrap</code>, <code>toggle_tree</code>, <code>toggle_line_numbers</code>, <code>toggle_blame</code>, <code>toggle_word_diff</code>, <code>toggle_hunk</code>, <code>toggle_untracked</code>, <code>mark_reviewed</code>, <code>theme_select</code>, <code>filter</code>, <code>info</code>, <code>reload</code></p>
@@ -699,6 +715,7 @@ map alt+t&gt;n theme_select</code></div>
         <div class="code-block"><code>{ "permissions": { "excludedCommands": ["*/launch-revdiff.sh*"] } }</code></div>
         <p>Terminals that use CLI tools instead of AppleScript (agterm, tmux, Zellij, herdr, kitty, wezterm, Kaku, cmux) are not affected.</p>
         <p><strong>Disconnect-resilient tmux window mode:</strong> set <code>REVDIFF_TMUX_WINDOW=1</code> in the launcher's environment to open revdiff in a persistent, server-owned tmux window instead of a client-owned <code>display-popup</code>. A dropped SSH or tmux client tears down a popup and kills the review, but a server-owned window survives the disconnect &mdash; reattach and the live review is still there. This is a launcher environment variable, not a revdiff flag.</p>
+        <p><strong>Pane-scoped overlay (agterm):</strong> set <code>REVDIFF_AGTERM_PANE=1</code> in the launcher's environment to open revdiff in the agent's own split pane instead of over the whole session, leaving the sibling pane live and visible. It applies only when that session is split &mdash; the session-wide overlay stands otherwise, and the launcher retries session-wide if agterm refuses the pane. The review gets pane width rather than session width, which is why it is opt-in. This is a launcher environment variable, not a revdiff flag.</p>
 
         <h2 id="plugin-usage">Plugin usage</h2>
         <h3>Slash commands</h3>
@@ -719,6 +736,13 @@ map alt+t&gt;n theme_select</code></div>
 "switch revdiff to dracula theme"   <span class="code-comment">-- modify config via conversation</span></code></div>
         <p>The plugin includes built-in reference documentation and can answer questions about revdiff usage, themes, keybindings, and configuration. It can also create or modify the local config file on request.</p>
         <p>The plugin supports the full review loop: annotate &rarr; plan &rarr; fix &rarr; re-review until no more annotations remain. The bundled launcher treats exit code <code>10</code> as success-with-annotations and processes stdout normally.</p>
+        <p><strong>Ask instead of instruct:</strong> an annotation containing <code>??</code> anywhere in its text is treated as a question rather than a directive, so the agent explains that code instead of changing it. Openers <code>explain</code>, <code>remind</code>, <code>describe</code>, <code>what is</code>, <code>what are</code>, <code>how does</code>, <code>how do</code> and <code>clarify</code> do the same. <code>??</code> is the language-neutral form and works whatever you write in.</p>
+        <div class="code-block"><code>## renderer.go:142 (+)
+why a pointer here??
+
+## store.go:88 (-)
+explain what this lock protects</code></div>
+        <p>The answer comes back as a markdown document reopened in revdiff, with a TOC sidebar, so you can annotate the explanation itself to ask follow-ups. That loop repeats until you quit without annotating. Any code-change annotations from the same batch are held and applied afterwards. The Codex plugin behaves the same way; the Pi package classifies questions too but answers them in chat.</p>
 
         <h2 id="plugin-autodetect">Auto-detection</h2>
         <p>When no ref is provided, the plugin detects what to review automatically:</p>
@@ -732,7 +756,7 @@ map alt+t&gt;n theme_select</code></div>
         <h2 id="plugin-planning">Plan review plugin</h2>
         <p>A separate <code>revdiff-planning</code> plugin automatically opens revdiff when Claude or Codex completes a plan, letting you annotate it before implementation. If you add annotations, the agent revises the full plan and presents it again, looping until you're satisfied. Exit code <code>10</code> means annotations were captured, not launcher failure.</p>
         <p>Claude Code:</p>
-        <div class="code-block"><code>/plugin install revdiff-planning@revdiff</code></div>
+        <div class="code-block"><code>/plugin marketplace add umputun/revdiff<br>/plugin install revdiff-planning@revdiff</code></div>
         <p>Codex:</p>
         <div class="code-block"><code>codex plugin marketplace add umputun/revdiff<br>codex plugin add revdiff-planning@revdiff</code></div>
         <p>Start a new Codex session and trust the hook through <code>/hooks</code>. Automatic review only fires for complete <code>&lt;proposed_plan&gt;</code> blocks in Plan mode; <code>/revdiff-plan</code> remains the manual fallback.</p>

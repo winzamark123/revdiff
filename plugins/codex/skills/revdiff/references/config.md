@@ -21,11 +21,14 @@ Then uncomment and edit the values you want to change.
 | `--staged` | `REVDIFF_STAGED` | Show staged changes | `false` |
 | `--untracked` | `REVDIFF_UNTRACKED` | Show untracked files in the tree | `false` |
 | `--tree-width` | `REVDIFF_TREE_WIDTH` | File tree panel width in units (1-10) | `2` |
+| `--tree-position` | `REVDIFF_TREE_POSITION` | File tree and markdown TOC position (`left` or `right`) | `left` |
 | `--tab-width` | `REVDIFF_TAB_WIDTH` | Spaces per tab character | `4` |
 | `--no-colors` | `REVDIFF_NO_COLORS` | Disable all colors including syntax highlighting | `false` |
 | `--no-status-bar` | `REVDIFF_NO_STATUS_BAR` | Hide the status bar | `false` |
 | `--wrap` | `REVDIFF_WRAP` | Enable line wrapping in diff view | `false` |
 | `--wrap-indent` | `REVDIFF_WRAP_INDENT` | Indent wrap continuation rows by N columns so they hang under the first row's content (helps when reviewing markdown lists where unindented continuation can be misread as a new bullet) | `0` |
+| `--page-overlap` | `REVDIFF_PAGE_OVERLAP` | Keep N lines from the previous screen when paging the diff | `0` |
+| `--start-at-change` | `REVDIFF_START_AT_CHANGE` | Position the cursor on the first changed line | `false` |
 | `--collapsed` | `REVDIFF_COLLAPSED` | Start in collapsed diff mode | `false` |
 | `--compact` | `REVDIFF_COMPACT` | Start in compact diff mode (small context around changes) | `false` |
 | `--compact-context` | `REVDIFF_COMPACT_CONTEXT` | Number of context lines around changes when in compact mode | `5` |
@@ -36,6 +39,7 @@ Then uncomment and edit the values you want to change.
 | `--exit-code-on-annotations` | `REVDIFF_EXIT_CODE_ON_ANNOTATIONS` | Exit 10 when annotations are produced | `false` |
 | `--no-confirm-discard` | `REVDIFF_NO_CONFIRM_DISCARD` | Skip confirmation when discarding annotations with Q | `false` |
 | `--no-mouse` | `REVDIFF_NO_MOUSE` | Disable mouse support (scroll wheel, click) | `false` |
+| `--no-tree` | `REVDIFF_NO_TREE` | Hide the file tree pane | `false` |
 | `--vim-motion` | `REVDIFF_VIM_MOTION` | Enable vim-style motion preset (counts, `gg`, `G`, `H`/`M`/`L`, `zz`/`zt`/`zb`, `ZZ`/`ZQ`) | `false` |
 | `--chroma-style` | `REVDIFF_CHROMA_STYLE` | Chroma color theme for syntax highlighting | `catppuccin-macchiato` |
 | `--theme` | `REVDIFF_THEME` | Load color theme from `~/.config/revdiff/themes/`; use `auto` to choose by terminal background | |
@@ -69,6 +73,10 @@ When launched via the Claude Code plugin skill, revdiff opens in a terminal over
 |---------|-------------|---------|
 | `REVDIFF_POPUP_WIDTH` | Tmux/Zellij popup width (e.g., `100%`, `80%`) | `90%` |
 | `REVDIFF_POPUP_HEIGHT` | Tmux/Zellij popup height / wezterm split percent | `90%` |
+
+## Pane-Scoped Overlay (agterm)
+
+Set `REVDIFF_AGTERM_PANE=1` in the launcher's environment to open revdiff in the agent's own split pane instead of over the whole session, leaving the sibling pane live and visible. It applies only when that session is split — the session-wide overlay stands otherwise, and the launcher retries session-wide if agterm refuses the pane. The review gets pane width rather than session width, which is why it is opt-in. This is a launcher environment variable, not a revdiff flag.
 
 ## Themes
 
@@ -147,7 +155,7 @@ unmap q
 map ctrl+d half_page_down
 ```
 
-Available actions: `down`, `up`, `page_down`, `page_up`, `half_page_down`, `half_page_up`, `home`, `end`, `scroll_left`, `scroll_right`, `scroll_center`, `scroll_top`, `scroll_bottom`, `scroll_diff_down`, `scroll_diff_up`, `next_item`, `prev_item`, `next_hunk`, `prev_hunk`, `open_file_in_editor`, `toggle_pane`, `focus_tree`, `focus_diff`, `search`, `confirm`, `annotate_file`, `delete_annotation`, `annot_list`, `open_editor`, `next_annotation`, `prev_annotation`, `flush_output`, `toggle_collapsed`, `toggle_compact`, `toggle_wrap`, `toggle_tree`, `toggle_line_numbers`, `toggle_blame`, `toggle_word_diff`, `toggle_hunk`, `toggle_untracked`, `mark_reviewed`, `theme_select`, `filter`, `info`, `reload`, `quit`, `discard_quit`, `help`, `dismiss`
+Available actions: `down`, `up`, `page_down`, `page_up`, `half_page_down`, `half_page_up`, `home`, `end`, `scroll_left`, `scroll_right`, `scroll_center`, `scroll_top`, `scroll_bottom`, `scroll_diff_down`, `scroll_diff_up`, `next_item`, `prev_item`, `jump_file`, `next_hunk`, `prev_hunk`, `open_file_in_editor`, `toggle_pane`, `focus_left`, `focus_right`, `focus_tree`, `focus_diff`, `search`, `confirm`, `annotate_file`, `delete_annotation`, `annot_list`, `open_editor`, `next_annotation`, `prev_annotation`, `flush_output`, `toggle_collapsed`, `toggle_compact`, `toggle_wrap`, `toggle_tree`, `toggle_line_numbers`, `toggle_blame`, `toggle_word_diff`, `toggle_hunk`, `toggle_untracked`, `mark_reviewed`, `theme_select`, `filter`, `info`, `reload`, `quit`, `discard_quit`, `help`, `dismiss`
 
 Fixed modal keys (Enter, Esc in annotation/search input, confirm discard) are not remappable. Keymap-resolved actions like `open_editor` work during annotation input and can be rebound. Chord bindings do not fire during text input — use single-key `ctrl+*` bindings for actions that need to work during annotation input.
 

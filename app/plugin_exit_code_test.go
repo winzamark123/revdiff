@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -42,6 +43,7 @@ type launcherRun struct {
 	backend launcherBackend
 	code    int
 	output  string
+	stderr  string
 }
 
 type pluginManifest struct {
@@ -115,24 +117,30 @@ func TestShellLaunchersPreserveAnnotationExitCode(t *testing.T) {
 	root := testRepoRoot(t)
 	planFile := filepath.Join(t.TempDir(), "plan.md")
 	writeTestFile(t, planFile, "# Plan\n")
+	unknownFlagError := "revdiff: unknown flag `--bogus-flag'"
 
 	launchers := []struct {
-		name string
-		path string
-		args []string
+		name         string
+		path         string
+		args         []string
+		relaysStderr bool
 	}{
-		{name: "claude", path: ".claude-plugin/skills/revdiff/scripts/launch-revdiff.sh"},
-		{name: "codex", path: "plugins/codex/skills/revdiff/scripts/launch-revdiff.sh"},
+		{name: "claude", path: ".claude-plugin/skills/revdiff/scripts/launch-revdiff.sh", relaysStderr: true},
+		{name: "codex", path: "plugins/codex/skills/revdiff/scripts/launch-revdiff.sh", relaysStderr: true},
 		{name: "plan review", path: "plugins/revdiff-planning/scripts/launch-plan-review.sh", args: []string{planFile}},
 	}
+	// stderr relay fires on failure only: 0 is a clean quit and 10 means
+	// annotations were captured, and revdiff writes ordinary warnings to stderr,
+	// so relaying either would put noise on every successful review
 	cases := []struct {
-		name   string
-		code   int
-		output string
+		name       string
+		code       int
+		output     string
+		wantStderr bool
 	}{
 		{name: "clean", code: 0},
 		{name: "annotations", code: exitCodeAnnotations, output: "## file.go:1 (+)\ncomment\n"},
-		{name: "failure", code: 1, output: "partial output\n"},
+		{name: "failure", code: 1, output: "partial output\n", wantStderr: true},
 	}
 
 	for _, launcher := range launchers {
@@ -140,21 +148,260 @@ func TestShellLaunchersPreserveAnnotationExitCode(t *testing.T) {
 			t.Run(launcher.name+"/"+backend.name, func(t *testing.T) {
 				for _, tc := range cases {
 					t.Run(tc.name, func(t *testing.T) {
+						run := launcherRun{backend: backend, code: tc.code, output: tc.output}
+						if launcher.relaysStderr {
+							run.stderr = unknownFlagError
+						}
+						env := fakeLauncherEnv(t, run)
 						script := filepath.Join(root, launcher.path)
 						args := append([]string{script}, launcher.args...)
 						res := runTestCmd(t, cmdReq{
 							dir:  root,
 							name: "bash",
 							args: args,
-							env: fakeLauncherEnv(t, launcherRun{
-								backend: backend,
-								code:    tc.code,
-								output:  tc.output,
-							}),
+							env:  env,
 						})
 						assert.Equal(t, tc.code, res.code)
 						assert.Equal(t, tc.output, res.stdout)
+						if launcher.relaysStderr && tc.wantStderr {
+							assert.Contains(t, res.stderr, unknownFlagError)
+						} else {
+							assert.Empty(t, res.stderr)
+						}
+						// each backend that overrides the base EXIT trap has to
+						// name the capture file; one that forgets leaks it
+						assert.Empty(t, leftoverStderrCaptures(t, env["TMPDIR"]))
 					})
+				}
+			})
+		}
+	}
+}
+
+// pins #314: an apostrophe in a heredoc nested inside a command substitution
+// breaks the whole launcher under bash 3.2, the stock macOS /bin/bash. the
+// launchers cannot be parse-checked for it here — CI and most dev machines run
+// bash 5, which accepts the broken form — so the guard is textual and portable.
+func TestLauncherNestedHeredocsHaveNoApostrophes(t *testing.T) {
+	root := testRepoRoot(t)
+	paths := []string{
+		".claude-plugin/skills/revdiff/scripts/launch-revdiff.sh",
+		"plugins/codex/skills/revdiff/scripts/launch-revdiff.sh",
+		"plugins/revdiff-planning/scripts/launch-plan-review.sh",
+	}
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			bodies := nestedHeredocBodies(readRepoFile(t, root, path))
+			require.NotEmpty(t, bodies, "no command-substitution heredoc found; the scan no longer matches the script")
+			for _, hd := range bodies {
+				for _, line := range hd.lines {
+					assert.NotContains(t, line.text, "'",
+						"%s:%d is inside the heredoc opened at line %d, which bash 3.2 scans for quotes as part of "+
+							"the enclosing $( ); an apostrophe here fails the whole script. reword to avoid it",
+						path, line.num, hd.openedAt)
+				}
+			}
+		})
+	}
+}
+
+type heredocLine struct {
+	text string
+	num  int
+}
+
+type nestedHeredoc struct {
+	lines    []heredocLine
+	openedAt int
+}
+
+// nestedHeredocBodies returns the body of every heredoc opened on a line that also
+// opens a command substitution. a heredoc outside one is unaffected by the bash 3.2
+// scan, so including it would ban apostrophes the shell handles correctly.
+func nestedHeredocBodies(script string) []nestedHeredoc {
+	opener := regexp.MustCompile(`\$\(.*<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?`)
+	var found []nestedHeredoc
+	var current *nestedHeredoc
+	var terminator string
+
+	for i, line := range strings.Split(script, "\n") {
+		num := i + 1
+		if current != nil {
+			if strings.TrimSpace(line) == terminator {
+				found = append(found, *current)
+				current = nil
+			} else {
+				current.lines = append(current.lines, heredocLine{num: num, text: line})
+			}
+			continue
+		}
+		if m := opener.FindStringSubmatch(line); m != nil {
+			current = &nestedHeredoc{openedAt: num}
+			terminator = m[1]
+		}
+	}
+	return found
+}
+
+// every other backend labels its overlay through a flag the exit-code matrix
+// already runs (tmux -T, kitty --title); iTerm2 names the session it splits from
+// an AppleScript argv, which nothing else in the suite reads
+func TestIterm2OverlayNamesSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell launchers are not used on windows")
+	}
+
+	root := testRepoRoot(t)
+	planFile := filepath.Join(t.TempDir(), "plan.md")
+	writeTestFile(t, planFile, "# Plan\n")
+	diffTitle := "rd: " + filepath.Base(root) + " [HEAD~1]"
+
+	launchers := []struct {
+		name  string
+		path  string
+		args  []string
+		title string
+	}{
+		{
+			name:  "claude",
+			path:  ".claude-plugin/skills/revdiff/scripts/launch-revdiff.sh",
+			args:  []string{"HEAD~1"},
+			title: diffTitle,
+		},
+		{
+			name:  "codex",
+			path:  "plugins/codex/skills/revdiff/scripts/launch-revdiff.sh",
+			args:  []string{"HEAD~1"},
+			title: diffTitle,
+		},
+		{
+			name:  "plan review",
+			path:  "plugins/revdiff-planning/scripts/launch-plan-review.sh",
+			args:  []string{planFile},
+			title: "plan: plan.md",
+		},
+	}
+
+	output := "## file.go:1 (+)\ncomment\n"
+	backend := launcherBackend{name: "iterm2", command: "osascript", env: map[string]string{"ITERM_SESSION_ID": "w0t0p0:ABC"}}
+	for _, launcher := range launchers {
+		t.Run(launcher.name, func(t *testing.T) {
+			env := fakeLauncherEnv(t, launcherRun{backend: backend, code: exitCodeAnnotations, output: output})
+			argsFile := filepath.Join(env["TMPDIR"], "osascript-args")
+			env["FAKE_OSASCRIPT_ARGS_FILE"] = argsFile
+
+			res := runTestCmd(t, cmdReq{
+				dir:  root,
+				name: "bash",
+				args: append([]string{filepath.Join(root, launcher.path)}, launcher.args...),
+				env:  env,
+			})
+			assert.Equal(t, exitCodeAnnotations, res.code)
+			assert.Equal(t, output, res.stdout)
+
+			raw, err := os.ReadFile(argsFile) //nolint:gosec // path is a test-owned temp file
+			require.NoError(t, err)
+			calls := strings.Split(strings.TrimSpace(string(raw)), "\n")
+			require.NotEmpty(t, calls)
+			// the title is the last argv item, so the launch script stays at position 3 and the
+			// stub's -x "$3" test still matches. the two launch-revdiff.sh calls go 5 -> 6 args and
+			// stay in the >=5 branch where the trailing title is dropped; launch-plan-review.sh goes
+			// 4 -> 5 and crosses into that branch, so the stub hands its launch script the title as
+			// $2 while production passes the sentinel alone — that heredoc must keep reading $1 only
+			assert.True(t, strings.HasSuffix(calls[0], " "+launcher.title),
+				"split osascript argv should end with the overlay title, got %q", calls[0])
+		})
+	}
+}
+
+func TestAgtermPaneOverlayOptIn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell launchers are not used on windows")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("the launcher's split check needs jq")
+	}
+
+	root := testRepoRoot(t)
+	launchers := []struct {
+		name string
+		path string
+	}{
+		{name: "claude", path: ".claude-plugin/skills/revdiff/scripts/launch-revdiff.sh"},
+		{name: "codex", path: "plugins/codex/skills/revdiff/scripts/launch-revdiff.sh"},
+	}
+	cases := []struct {
+		name      string
+		env       map[string]string
+		wantPane  bool
+		wantOpens int
+	}{
+		{
+			name:      "opt-in in a split scopes the overlay to the pane",
+			env:       map[string]string{"REVDIFF_AGTERM_PANE": "1", "FAKE_AGTERM_PANE": "1", "FAKE_AGTERM_SPLIT": "true"},
+			wantPane:  true,
+			wantOpens: 1,
+		},
+		{
+			name:      "without the opt-in the overlay stays session-wide",
+			env:       map[string]string{"FAKE_AGTERM_PANE": "1", "FAKE_AGTERM_SPLIT": "true"},
+			wantOpens: 1,
+		},
+		{
+			name:      "opt-in without a split stays session-wide",
+			env:       map[string]string{"REVDIFF_AGTERM_PANE": "1", "FAKE_AGTERM_PANE": "1", "FAKE_AGTERM_SPLIT": "false"},
+			wantOpens: 1,
+		},
+		{
+			name:      "opt-in on an older cli stays session-wide",
+			env:       map[string]string{"REVDIFF_AGTERM_PANE": "1", "FAKE_AGTERM_SPLIT": "true"},
+			wantOpens: 1,
+		},
+		{
+			name: "a refused pane overlay retries session-wide",
+			env: map[string]string{"REVDIFF_AGTERM_PANE": "1", "FAKE_AGTERM_PANE": "1", "FAKE_AGTERM_SPLIT": "true",
+				"FAKE_AGTERM_PANE_REFUSE": "1"},
+			wantPane:  true,
+			wantOpens: 2,
+		},
+	}
+
+	output := "## file.go:1 (+)\ncomment\n"
+	for _, launcher := range launchers {
+		for _, tc := range cases {
+			t.Run(launcher.name+"/"+tc.name, func(t *testing.T) {
+				backend := launcherBackend{name: "agterm", command: "agtermctl", env: map[string]string{
+					"AGTERM_SESSION_ID": "sess-1",
+					"AGTERM_WINDOW_ID":  "win-1",
+					"AGTERM_PANE":       "left",
+				}}
+				env := fakeLauncherEnv(t, launcherRun{backend: backend, code: exitCodeAnnotations, output: output})
+				argsFile := filepath.Join(env["TMPDIR"], "agterm-args")
+				env["FAKE_AGTERM_ARGS_FILE"] = argsFile
+				maps.Copy(env, tc.env)
+
+				res := runTestCmd(t, cmdReq{
+					dir:  root,
+					name: "bash",
+					args: []string{filepath.Join(root, launcher.path)},
+					env:  env,
+				})
+				assert.Equal(t, exitCodeAnnotations, res.code)
+				assert.Equal(t, output, res.stdout)
+
+				raw, err := os.ReadFile(argsFile) //nolint:gosec // path is a test-owned temp file
+				require.NoError(t, err)
+				opens := strings.Split(strings.TrimSpace(string(raw)), "\n")
+				require.Len(t, opens, tc.wantOpens)
+				if tc.wantPane {
+					assert.Contains(t, opens[0], "--pane left")
+				} else {
+					assert.NotContains(t, opens[0], "--pane")
+				}
+				if len(opens) > 1 {
+					// the retry drops the pane scoping, otherwise agterm refuses it again
+					assert.NotContains(t, opens[len(opens)-1], "--pane")
 				}
 			})
 		}
@@ -1003,8 +1250,7 @@ func commandExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 		return exitErr.ExitCode()
 	}
 	return 1
@@ -1096,6 +1342,7 @@ func fakeLauncherEnv(t *testing.T, r launcherRun) map[string]string {
 	env := cleanOverlayEnv()
 	maps.Copy(env, r.backend.env)
 	env["FAKE_OUTPUT"] = r.output
+	env["FAKE_STDERR"] = r.stderr
 	env["FAKE_RC"] = strconv.Itoa(r.code)
 	env["PATH"] = binDir + string(os.PathListSeparator) + os.Getenv("PATH")
 	env["TMPDIR"] = tmp
@@ -1122,6 +1369,11 @@ func cleanOverlayEnv() map[string]string {
 		"INSIDE_EMACS":          "",
 		"AGTERM_SESSION_ID":     "",
 		"AGTERM_SOCKET":         "",
+		"AGTERM_PANE":           "",
+		"AGTERM_WINDOW_ID":      "",
+		"REVDIFF_AGTERM_PANE":   "",
+		"REVDIFF_TMUX_WINDOW":   "",
+		"AGENTDECK_INSTANCE_ID": "",
 		"REVDIFF_CONFIG":        "",
 	}
 }
@@ -1132,6 +1384,13 @@ func resolverScript(launcher string) string {
 
 func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func leftoverStderrCaptures(t *testing.T, dir string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "revdiff-err-*"))
+	require.NoError(t, err)
+	return matches
 }
 
 func planSnapshots(t *testing.T, dir string) []string {

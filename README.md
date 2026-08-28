@@ -11,6 +11,7 @@ Built for a specific use case: reviewing code changes, plans, and documents with
 - Intra-line word-diff: highlights the specific changed words within paired add/remove lines using a brighter background overlay, off by default — enable with `--word-diff` or toggle with `W`
 - Collapsed diff mode: shows final text with change markers, toggle with `v`
 - Word wrap mode: wraps long lines at viewport boundary with `↪` continuation markers, toggle with `w`; optional `--wrap-indent N` for hanging-indent continuations (handy for markdown lists)
+- Page scroll overlap: `--page-overlap N` carries the bottom N lines of the screen to the top of the next one on PgUp/PgDn, so the seam between screens keeps context; the carryover is approximate on wrapped or annotated lines, which occupy several rows but are a single cursor stop
 - Horizontal scroll overflow indicators: truncated diff lines show `«` / `»` markers at the edges to signal hidden content off-screen
 - Vertical scrollbar thumb: a thicker `┃` segment on pane right borders indicates the visible portion of long diffs, file trees, and markdown TOCs; thumb size and position track scroll progress automatically
 - Line numbers: side-by-side old/new line number gutter for diffs, single column for full-context files, toggle with `L`
@@ -20,7 +21,7 @@ Built for a specific use case: reviewing code changes, plans, and documents with
 - Blame gutter: shows author name and commit age per line, toggle with `B`
 - Annotate any line in the diff (added, removed, or context) plus file-level notes
 - Single-file auto-detection: when a diff contains exactly one file, hides the tree pane and gives full terminal width to the diff view
-- Two-pane TUI: file tree (left) + colorized diff viewport (right)
+- Two-pane TUI: file tree + colorized diff viewport
 - Vim-style `/` search within diff with `n`/`N` match navigation
 - Hunk navigation to jump between change groups
 - Annotation list popup (`@`): browse all annotations across files, jump to any annotation
@@ -113,6 +114,8 @@ Priority: agterm → tmux → Zellij → herdr → kitty → wezterm/Kaku → cm
 
 > **Disconnect-resilient tmux window mode:** set `REVDIFF_TMUX_WINDOW=1` in the launcher's environment to open revdiff in a persistent, server-owned tmux window instead of a client-owned `display-popup`. A dropped SSH or tmux client tears down a popup and kills the review, but a server-owned window survives the disconnect — reattach and the live review is still there. This is a launcher environment variable, not a revdiff flag.
 
+> **Pane-scoped overlay (agterm):** set `REVDIFF_AGTERM_PANE=1` in the launcher's environment to open revdiff in the agent's own split pane instead of over the whole session, leaving the sibling pane live and visible. It applies only when that session is split — the session-wide overlay stands otherwise, and the launcher retries session-wide if agterm refuses the pane. The review gets pane width rather than session width, which is why it is opt-in. This is a launcher environment variable, not a revdiff flag.
+
 **Install:**
 
 ```bash
@@ -159,6 +162,18 @@ The plugin includes built-in reference documentation and can answer questions ab
 
 The plugin supports the full review loop: annotate → plan → fix → re-review until no more annotations remain. The bundled launcher treats exit code `10` as success-with-annotations and processes stdout normally.
 
+**Ask instead of instruct:** an annotation containing `??` anywhere in its text is treated as a question rather than a directive, so the agent explains that code instead of changing it. Openers `explain`, `remind`, `describe`, `what is`, `what are`, `how does`, `how do` and `clarify` do the same. `??` is the language-neutral form and works whatever you write in.
+
+```
+## renderer.go:142 (+)
+why a pointer here??
+
+## store.go:88 (-)
+explain what this lock protects
+```
+
+The answer comes back as a markdown document reopened in revdiff, with a TOC sidebar, so you can annotate the explanation itself to ask follow-ups. That loop repeats until you quit without annotating. Any code-change annotations from the same batch are held and applied afterwards. The Codex plugin behaves the same way; the Pi package classifies questions too but answers them in chat.
+
 **Custom launchers:** the Claude diff-review skill and the cross-runtime planning plugin resolve launchers through a two-layer chain (user → bundled). Claude uses `${CLAUDE_PLUGIN_DATA}/scripts/<launcher>`; the Codex planning hook uses `${PLUGIN_DATA}/scripts/launch-plan-review.sh`. There is no project-level executable override by design because these hooks auto-fire in any opened repository. See `.claude-plugin/skills/revdiff/references/install.md` for diff review and [plugins/revdiff-planning/README.md](plugins/revdiff-planning/README.md) for plan review.
 
 ### Plan Review Plugin
@@ -168,6 +183,7 @@ A separate `revdiff-planning` plugin automatically opens revdiff when Claude or 
 Claude Code:
 
 ```bash
+/plugin marketplace add umputun/revdiff
 /plugin install revdiff-planning@revdiff
 ```
 
@@ -354,15 +370,18 @@ Positional arguments support several forms:
 | `--staged` | Show staged changes, env: `REVDIFF_STAGED` | `false` |
 | `--untracked` | Show untracked files in the tree, env: `REVDIFF_UNTRACKED` | `false` |
 | `--tree-width` | File tree panel width in units (1-10), env: `REVDIFF_TREE_WIDTH` | `2` |
+| `--tree-position` | File tree and markdown TOC position (`left` or `right`), env: `REVDIFF_TREE_POSITION` | `left` |
 | `--tab-width` | Number of spaces per tab character, env: `REVDIFF_TAB_WIDTH` | `4` |
 | `--no-colors` | Disable all colors including syntax highlighting, env: `REVDIFF_NO_COLORS` | `false` |
 | `--no-status-bar` | Hide the status bar, env: `REVDIFF_NO_STATUS_BAR` | `false` |
 | `--wrap` | Enable line wrapping in diff view, env: `REVDIFF_WRAP` | `false` |
 | `--wrap-indent` | Indent wrap continuation rows by N columns so they hang under the first row's content (helps when reviewing markdown lists where unindented continuation can be misread as a new bullet), env: `REVDIFF_WRAP_INDENT` | `0` |
+| `--page-overlap` | Keep N lines from the previous screen when paging the diff, env: `REVDIFF_PAGE_OVERLAP` | `0` |
 | `--collapsed` | Start in collapsed diff mode, env: `REVDIFF_COLLAPSED` | `false` |
 | `--compact` | Start in compact diff mode (small context around changes), env: `REVDIFF_COMPACT` | `false` |
 | `--compact-context` | Number of context lines around changes when in compact mode, env: `REVDIFF_COMPACT_CONTEXT` | `5` |
 | `--cross-file-hunks` | Allow `[` and `]` to continue into adjacent files, env: `REVDIFF_CROSS_FILE_HUNKS` | `false` |
+| `--start-at-change` | Position the cursor on the first changed line, env: `REVDIFF_START_AT_CHANGE` | `false` |
 | `--line-numbers` | Show line numbers in diff gutter, env: `REVDIFF_LINE_NUMBERS` | `false` |
 | `--blame` | Show blame gutter, env: `REVDIFF_BLAME` | `false` |
 | `--word-diff` | Highlight intra-line word-level changes in paired add/remove lines, env: `REVDIFF_WORD_DIFF` | `false` |
@@ -371,6 +390,7 @@ Positional arguments support several forms:
 | `--no-confirm-discard` | Skip confirmation when discarding annotations with Q, env: `REVDIFF_NO_CONFIRM_DISCARD` | `false` |
 | `--no-confirm-reload` | Skip confirmation when dropping annotations on reload with R, env: `REVDIFF_NO_CONFIRM_RELOAD` | `false` |
 | `--no-mouse` | Disable mouse support (scroll wheel, click), env: `REVDIFF_NO_MOUSE` | `false` |
+| `--no-tree` | Hide the file tree pane, env: `REVDIFF_NO_TREE` | `false` |
 | `--vim-motion` | Enable vim-style motion preset (counts, `gg`, `G`, `H`/`M`/`L`, `zz`/`zt`/`zb`, `ZZ`/`ZQ`), env: `REVDIFF_VIM_MOTION` | `false` |
 | `--chroma-style` | Chroma color theme for syntax highlighting, env: `REVDIFF_CHROMA_STYLE` | `catppuccin-macchiato` |
 | `--theme` | Load color theme from `~/.config/revdiff/themes/`; use `auto` to choose by terminal background, env: `REVDIFF_THEME` | |
@@ -392,6 +412,7 @@ Positional arguments support several forms:
 | `-X`, `--exclude` | Exclude files matching prefix, may be repeated, env: `REVDIFF_EXCLUDE` (comma-separated) | |
 | `-F`, `--only` | Show only matching files by exact path or suffix, may be repeated (e.g. `--only=model.go`) | |
 | `-o`, `--output` | Write annotations to file instead of stdout, env: `REVDIFF_OUTPUT` | |
+| `--post-flush-command` | Run command after a successful `O` flush (requires `-o`/`--output`), env: `REVDIFF_POST_FLUSH_COMMAND`, config: `post-flush-command` | |
 | `--annotations` | Preload annotations from a markdown file in `-o` format | |
 | `--history-dir` | Directory for review history auto-saves, env: `REVDIFF_HISTORY_DIR` | `~/.config/revdiff/history/` |
 | `--config` | Path to config file, env: `REVDIFF_CONFIG` | `~/.config/revdiff/config` |
@@ -664,7 +685,7 @@ revdiff HEAD~3 --description-file=.review-description.md
 
 ### Markdown TOC Navigation
 
-When reviewing a single markdown file in context-only mode (e.g., `revdiff --only=README.md` or `printf '# title\n' | revdiff --stdin --stdin-name plan.md`), revdiff shows a table-of-contents pane on the left listing all markdown headers. Use `Tab` to switch focus between the TOC and diff panes, `j`/`k` to navigate headers, and `Enter` to jump to a header in the diff. The TOC automatically highlights the current section as you scroll through the file.
+When reviewing a single markdown file in context-only mode (e.g., `revdiff --only=README.md` or `printf '# title\n' | revdiff --stdin --stdin-name plan.md`), revdiff shows a table-of-contents pane on the configured side listing all markdown headers. Use `Tab` to switch focus between the TOC and diff panes, `j`/`k` to navigate headers, and `Enter` to jump to a header in the diff. The TOC automatically highlights the current section as you scroll through the file.
 
 This mode activates when all three conditions are met: single file, markdown extension (`.md`/`.markdown`), and all lines are context (no diff changes). Headers inside fenced code blocks are excluded from the TOC.
 
@@ -722,8 +743,11 @@ In the Claude Code and Codex plugins, you can also tell the agent to use a past 
 | `Home/End` | Jump to first/last item |
 | `Enter` | Switch to diff pane (tree) / start annotation (diff pane) |
 | `n/p` | Next/previous changed file; next/prev header in markdown TOC mode (n = next match when search active) |
+| `P` | Open the file picker |
 | `[` / `]` | Jump to previous/next change hunk in diff; add `--cross-file-hunks` to continue into the previous/next file at the boundary |
 | `e` | Open focused file in `$EDITOR` |
+
+The file picker lists paths currently visible in the sidebar, so annotated-only and unreviewed-only filters remain active. Printable keys always filter full relative paths; use the arrow keys or mouse wheel to move, and press `Enter` or left-click to jump. `Backspace` edits the filter. The first `Esc` clears a non-empty filter and keeps the picker open; the second closes it. Because printable keys always filter, `P` typed inside the picker adds to the filter rather than closing it; a `jump_file` binding with a modifier (e.g. `map alt+f jump_file`) closes the picker when pressed again.
 
 **Search:**
 
@@ -754,6 +778,18 @@ While the annotation input is active, press `Ctrl+E` (or whatever key is bound t
 Press `e` in the diff pane to open the focused file in `$EDITOR` (`open_file_in_editor` — rebindable) when revdiff has a stable source path. Editor resolution is the same `$EDITOR` → `$VISUAL` → `vi` chain. Known editors receive either `$EDITOR +N path` or `$EDITOR --goto path:N` as appropriate; unknown editors receive only the file path. File lines are resolved on a best-effort basis. For working tree changes, a clean editor exit reloads the displayed file. For `--staged` or refs, a clean editor exit returns to revdiff without reloading the displayed diff. In compare mode, `e` opens the `--compare-new` side. Working tree files with line annotations cannot be opened for editing because edits can orphan those annotations. Diffs read with `--stdin` do not support opening files. Unsupported rows or files and editor errors show a status hint instead of launching an editor or changing the diff.
 
 Press `O` to write the current annotations to the `--output` file without exiting (`flush_output` — rebindable). This keeps revdiff open while handing the file to an AI agent: annotate, flush with `O`, let the agent read the file and edit code, then reload with `R` and continue in the same session. Each flush overwrites the file with the full current annotation set (a snapshot, not an append log), using the same atomic write as a normal quit. `O` requires `-o`/`--output`; with no output file, or with no annotations yet, it shows a status hint and writes nothing.
+
+One possible use is copying annotations to the terminal clipboard after every flush with OSC 52. revdiff does not include an OSC 52 helper; create an `osc-copy` shell script on your `PATH` that reads stdin and writes the clipboard sequence to `/dev/tty`:
+
+```sh
+#!/bin/sh
+data=$(base64 | tr -d '\n')
+printf '\033]52;c;%s\007' "$data" > /dev/tty
+```
+
+After making the script executable, run revdiff with `--post-flush-command=osc-copy` or set `post-flush-command = osc-copy` in the config file.
+
+The post-flush command runs synchronously. Use a fast, non-interactive command because revdiff waits for it to finish before restoring the TUI.
 
 Press `Space` to mark the focused file reviewed. Press `F` to toggle the sidebar between all files and unreviewed files; while filtered, marking a file reviewed removes it from the list and advances to the next unfinished file. On `R` reload, revdiff keeps the mark only when the file's effective text diff is unchanged; rebases that only shift line numbers or surrounding context keep it, while changed or removed files lose it. Binary files and opaque placeholders are conservatively unmarked on reload because their rendered diff does not expose enough content to prove they are unchanged.
 
@@ -807,9 +843,11 @@ revdiff enables mouse tracking by default so the scroll wheel and left-click wor
 - **Left-click in the tree**: focuses the tree and selects/loads the clicked entry (same as pressing `j`/`k` to land there). Clicking a directory row moves the cursor but does not load a file.
 - **Left-click in the diff**: focuses the diff and moves the cursor to the clicked line. Enables a "click, then `a`" annotation flow.
 - **Left-click in the TOC pane** (single-file markdown): focuses the TOC and selects the clicked header.
-- **Scroll wheel in overlay popups** (info, annotations, themes): scrolls the popup content or moves its cursor. Shift+wheel uses a half-page step. In the theme selector, wheel previews each theme live. Help overlay has no scrollable or selectable content so mouse events are ignored.
+- **Scroll wheel in overlay popups** (info, annotations, themes, help): scrolls the popup content or moves its cursor. Shift+wheel uses a half-page step. In the theme selector, wheel previews each theme live.
 - **Left-click in the annotation popup**: jumps to the clicked annotation (same as pressing `Enter`).
 - **Left-click in the theme popup**: confirms the clicked theme (same as pressing `Enter`). Clicks on the filter row or blank separator are ignored.
+- **Left-click in the file picker**: jumps to the clicked file (same as pressing `Enter`). Clicks on the filter row or blank separator are ignored.
+- **Scroll wheel in the file picker**: moves the picker cursor. Shift+wheel uses a half-page step.
 
 Horizontal wheel, right-click, middle-click, drag selection, and clicks on the status bar or diff header are intentionally ignored. Clicks outside an open overlay are swallowed — dismiss an overlay with `Esc` or its toggle key. Modal states (annotation input, search input, confirm discard, reload confirm) swallow mouse events entirely.
 
@@ -817,6 +855,7 @@ Horizontal wheel, right-click, middle-click, drag selection, and clicks on the s
 
 - **kitty**: hold `Ctrl+Shift` while dragging
 - **iTerm2**: hold `Option` while dragging
+- **ghostty** (and ghostty-based terminals such as agterm): hold `Shift` while dragging. Ghostty also uses `Shift` to *extend* an existing selection, so if text is already selected the drag grows that selection instead of starting a new one - clear it first. Ghostty 1.3.0+ additionally has a `toggle_mouse_reporting` keybind, unbound by default, which suspends mouse capture without restarting revdiff
 - **most other terminals**: hold `Shift` while dragging
 
 Because the tree pane is rendered alongside the diff on the same rows, multi-line Shift+drag will include tree content. For clean copies of diff text, use your terminal's block-select mode (Option+drag in iTerm2, Ctrl+Shift+drag in kitty) or run with `--no-mouse` to disable mouse capture entirely.
@@ -865,9 +904,9 @@ When the leader is pressed, the status bar shows `Pending: ctrl+w, esc to cancel
 
 **Navigation:** `down`, `up`, `page_down`, `page_up`, `half_page_down`, `half_page_up`, `home`, `end`, `scroll_left`, `scroll_right`, `scroll_center`, `scroll_top`, `scroll_bottom`, `scroll_diff_down`, `scroll_diff_up`
 
-**File/Hunk:** `next_item`, `prev_item`, `next_hunk`, `prev_hunk`, `open_file_in_editor`
+**File/Hunk:** `next_item`, `prev_item`, `jump_file`, `next_hunk`, `prev_hunk`, `open_file_in_editor`
 
-**Pane:** `toggle_pane`, `focus_tree`, `focus_diff`
+**Pane:** `toggle_pane`, `focus_left`, `focus_right`, `focus_tree`, `focus_diff`
 
 **Search:** `search`
 

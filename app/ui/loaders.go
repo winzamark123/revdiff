@@ -226,6 +226,14 @@ func (m Model) loadFileDiff(file string) tea.Cmd {
 	}
 }
 
+// requestFileDiff records the selected target, advances the load sequence, and
+// returns a command for that exact request.
+func (m *Model) requestFileDiff(file string) tea.Cmd {
+	m.file.requestedPath = file
+	m.file.loadSeq++
+	return m.loadFileDiff(file)
+}
+
 // fetchEffectiveFileDiff applies the same staged-only and untracked fallbacks
 // used by the visible diff. Fingerprints call this helper too, so review state
 // is always based on the content revdiff would actually display.
@@ -302,8 +310,7 @@ func (m *Model) reloadCurrentFile() tea.Cmd {
 	if m.file.name == "" {
 		return nil
 	}
-	m.file.loadSeq++
-	return m.loadFileDiff(m.file.name)
+	return m.requestFileDiff(m.file.name)
 }
 
 // captureCompactAnchor records the cursor's semantic position before a compact
@@ -367,9 +374,16 @@ func (m Model) loadBlame(file string) tea.Cmd {
 // loadSelectedIfChanged ensures the tree is visible and loads the selected file if it changed.
 func (m Model) loadSelectedIfChanged() (tea.Model, tea.Cmd) {
 	m.tree.EnsureVisible(m.treePageSize())
-	if f := m.tree.SelectedFile(); f != "" && f != m.file.name {
-		m.file.loadSeq++
-		return m, m.loadFileDiff(f)
+	if f := m.tree.SelectedFile(); f != "" {
+		if f != m.file.name {
+			cmd := m.requestFileDiff(f)
+			return m, cmd
+		}
+		if m.file.requestedPath != "" && m.file.requestedPath != f {
+			m.file.canceledLoadSeq = m.file.loadSeq
+			m.file.canceledLoadPath = m.file.requestedPath
+			m.file.requestedPath = ""
+		}
 	}
 	return m, nil
 }
@@ -380,7 +394,8 @@ func (m Model) loadSelectedIfChanged() (tea.Model, tea.Cmd) {
 // overlay shows loading state (not stale data) while the re-fetch is in
 // flight, then re-runs the same parallel pipeline as startup via tea.Batch.
 // The selected file in the tree is restored by SelectByPath in
-// handleFilesLoaded; the diff cursor resets to the top of the file. Named
+// handleFilesLoaded; the diff cursor resets to the top of the file, or to its
+// first change when start-at-change is enabled. Named
 // triggerReload (not reload) to avoid shadowing the Model.reload field.
 func (m *Model) triggerReload() tea.Cmd {
 	m.filesLoadSeq++
@@ -461,6 +476,7 @@ func (m Model) handleFilesLoaded(msg filesLoadedMsg) (tea.Model, tea.Cmd) {
 		m.file.oldName = ""
 		m.file.lines = nil
 		m.file.highlighted = nil
+		m.file.lineWidths = nil
 		m.layout.viewport.SetContent("")
 		return m, statsCmd
 	}
@@ -474,8 +490,7 @@ func (m Model) handleFilesLoaded(msg filesLoadedMsg) (tea.Model, tea.Cmd) {
 
 	// auto-select first file
 	if f := m.tree.SelectedFile(); f != "" {
-		m.file.loadSeq++
-		return m, tea.Batch(m.loadFileDiff(f), statsCmd)
+		return m, tea.Batch(m.requestFileDiff(f), statsCmd)
 	}
 	return m, statsCmd
 }
@@ -506,6 +521,13 @@ func (m Model) handleFileLoaded(msg fileLoadedMsg) (tea.Model, tea.Cmd) {
 	if msg.seq != m.file.loadSeq {
 		return m, nil
 	}
+	// sequence equality alone is not enough when navigation returns to the
+	// already displayed file without issuing another load. Reject the exact
+	// outstanding request canceled by that no-load selection.
+	if msg.seq == m.file.canceledLoadSeq && msg.file == m.file.canceledLoadPath {
+		return m, nil
+	}
+	m.file.requestedPath = ""
 	if msg.err != nil {
 		m.layout.viewport.SetContent(fmt.Sprintf("error loading diff: %v", msg.err))
 		return m, nil
@@ -517,11 +539,12 @@ func (m Model) handleFileLoaded(msg fileLoadedMsg) (tea.Model, tea.Cmd) {
 	fingerprint := diff.FileFingerprint(entry, m.file.lines)
 	m.reviewed.cache[msg.file] = fingerprint
 	m.tree.ReconcileReviewedPath(msg.file, fingerprint)
-	m.invalidateAnnotationRows()
+	m.invalidateRenderCaches()
 	m.clearSearch()
 	m.computeFileStats()
 	m.file.highlighted = m.highlighter.HighlightLines(msg.file, m.file.lines)
 	m.recomputeIntraRanges()
+	m.file.lineWidths = m.computeLineWidths()
 	if m.modes.lineNumbers {
 		m.file.lineNumWidth = m.computeLineNumWidth()
 	}
@@ -584,6 +607,14 @@ func (m Model) handleFileLoaded(msg fileLoadedMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// sits below the three jump branches so an explicit jump target always wins, and must return
+	// early because the GotoTop below would undo the scroll.
+	if m.cfg.startAtChange {
+		m.positionOnFirstChange()
+		m.centerViewportOnCursor()
+		return m, blameCmd
+	}
+
 	m.layout.viewport.SetContent(m.renderDiff())
 	m.layout.viewport.GotoTop()
 	return m, blameCmd
@@ -618,6 +649,9 @@ func (m Model) handleBlameLoaded(msg blameLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.file.blameData = msg.data
 	m.file.blameAuthorLen = m.computeBlameAuthorLen()
+	// blameData is not part of globalRenderKey (a map is not comparable), so cached
+	// blocks rendered without blame would otherwise survive the gutter appearing
+	m.invalidateRenderCaches()
 	// flush deferred wheel pin before syncViewportToCursor so the post-blame
 	// scroll is anchored to the user's wheeled-to position rather than the
 	// pre-burst cursor. mirrors the handleResize flush rationale.

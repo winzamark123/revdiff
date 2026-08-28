@@ -9,12 +9,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/term"
 	"github.com/jessevdk/go-flags"
 	"github.com/muesli/termenv"
 
 	"github.com/umputun/revdiff/app/annotation"
 	"github.com/umputun/revdiff/app/diff"
 	"github.com/umputun/revdiff/app/fsutil"
+	"github.com/umputun/revdiff/app/handoff"
 	"github.com/umputun/revdiff/app/highlight"
 	"github.com/umputun/revdiff/app/keymap"
 	"github.com/umputun/revdiff/app/theme"
@@ -122,6 +124,22 @@ func run(opts options) (int, error) {
 	)
 
 	programOptions := []tea.ProgramOption{tea.WithAltScreen(), tea.WithoutSignalHandler()}
+	tuiOut, err := (tuiOutput{
+		stdout:     os.Stdout,
+		isTerminal: term.IsTerminal,
+		openTTY: func() (*os.File, error) {
+			// stdin mode and Bubble Tea's default input fallback open a separate
+			// read handle; each side owns and closes its handle independently.
+			return os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+		},
+	}).open()
+	if err != nil {
+		return 0, err
+	}
+	if tuiOut != os.Stdout {
+		defer func() { _ = tuiOut.Close() }()
+	}
+	programOptions = append(programOptions, tea.WithOutput(tuiOut))
 	if !opts.NoMouse {
 		programOptions = append(programOptions, tea.WithMouseCellMotion())
 	}
@@ -180,6 +198,12 @@ func run(opts options) (int, error) {
 		configPath: configPath,
 	}
 
+	// Configure the optional post-flush handoff separately from theme settings.
+	var postFlushHook ui.PostFlushHook
+	if hook := handoff.New(opts.PostFlushCommand); hook != nil {
+		postFlushHook = hook
+	}
+
 	model, err := ui.NewModel(ui.ModelConfig{
 		Renderer:             renderer,
 		Store:                store,
@@ -194,6 +218,7 @@ func run(opts options) (int, error) {
 		LoadUntracked:        untrackedFn,
 		LoadUntrackedRenames: untrackedRenamesFn,
 		Keymap:               km,
+		PostFlushHook:        postFlushHook,
 		CommitLog:            commitLogger,
 		CommitsApplicable:    commitsApplicable(opts, commitLogger),
 		ReloadApplicable:     reloadApplicable(opts),
@@ -203,12 +228,15 @@ func run(opts options) (int, error) {
 		NoStatusBar:          opts.NoStatusBar,
 		NoConfirmDiscard:     opts.NoConfirmDiscard,
 		NoConfirmReload:      opts.NoConfirmReload,
+		NoTree:               opts.NoTree,
 		Wrap:                 opts.Wrap,
 		WrapIndent:           opts.WrapIndent,
+		PageOverlap:          opts.PageOverlap,
 		Collapsed:            opts.Collapsed,
 		Compact:              opts.Compact,
 		CompactContext:       opts.CompactContext,
 		CrossFileHunks:       opts.CrossFileHunks,
+		StartAtChange:        opts.StartAtChange,
 		LineNumbers:          opts.LineNumbers,
 		ShowBlame:            opts.Blame,
 		ShowUntracked:        opts.startupUntracked(),
@@ -223,6 +251,7 @@ func run(opts options) (int, error) {
 		Ref:              opts.ref(),
 		Staged:           opts.Staged,
 		TreeWidthRatio:   opts.TreeWidth,
+		TreePosition:     opts.treePosition(),
 		Only:             opts.Only,
 		WorkDir:          workDir,
 		SourceEditor:     sourceEditorPolicy(opts, workDir),
@@ -279,6 +308,25 @@ func run(opts options) (int, error) {
 		return 0, fmt.Errorf("TUI error: %w", runErr)
 	}
 	return 0, nil
+}
+
+type tuiOutput struct {
+	stdout     *os.File
+	isTerminal func(uintptr) bool
+	openTTY    func() (*os.File, error)
+}
+
+// open keeps Bubble Tea's display traffic out of redirected stdout, which is
+// reserved for the final annotation stream. Terminal stdout is returned as-is.
+func (r tuiOutput) open() (*os.File, error) {
+	if r.isTerminal(r.stdout.Fd()) {
+		return r.stdout, nil
+	}
+	tty, err := r.openTTY()
+	if err != nil {
+		return nil, fmt.Errorf("revdiff requires an interactive terminal for the TUI: %w", err)
+	}
+	return tty, nil
 }
 
 type finalizeReq struct {

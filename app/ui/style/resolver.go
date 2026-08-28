@@ -310,6 +310,8 @@ func buildStyles(c Colors) map[StyleKey]lipgloss.Style {
 	// differentiation happens at the call site via width/focus logic
 	m[StyleKeyThemeSelectBoxFocused] = themeBox
 
+	m[StyleKeyFilePickerBox] = themeBox
+
 	// info overlay box (accent border matches help/annot/theme overlays, optional DiffBg background)
 	infoBox := lipgloss.NewStyle().
 		Border(border).
@@ -371,6 +373,8 @@ func buildPlainStyles() map[StyleKey]lipgloss.Style {
 	m[StyleKeyThemeSelectBox] = lipgloss.NewStyle().
 		Border(border).Padding(1, 1)
 	m[StyleKeyThemeSelectBoxFocused] = lipgloss.NewStyle().
+		Border(border).Padding(1, 1)
+	m[StyleKeyFilePickerBox] = lipgloss.NewStyle().
 		Border(border).Padding(1, 1)
 	m[StyleKeyInfoBox] = lipgloss.NewStyle().
 		Border(border).Padding(1, 2)

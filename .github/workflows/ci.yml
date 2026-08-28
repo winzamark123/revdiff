@@ -20,7 +20,7 @@ jobs:
           persist-credentials: false
 
       - name: set up go 1.26
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: "1.26"
         id: go
@@ -28,15 +28,20 @@ jobs:
       - name: set up bun
         uses: oven-sh/setup-bun@v2
 
+      - name: install jq
+        run: |
+          command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
+          jq --version
+
       - name: build and test
         run: |
-          go test -race -timeout=100s -covermode=atomic -coverprofile=$GITHUB_WORKSPACE/profile.cov_tmp ./...
+          go test -race -timeout=180s -covermode=atomic -coverprofile=$GITHUB_WORKSPACE/profile.cov_tmp ./...
           grep -v -E "_mock.go|/mocks/" $GITHUB_WORKSPACE/profile.cov_tmp > $GITHUB_WORKSPACE/profile.cov
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: "v2.11.4"
+          version: "v2.12.2"
 
       - name: install goveralls
         run: go install github.com/mattn/goveralls@latest

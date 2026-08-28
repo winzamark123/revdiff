@@ -90,11 +90,21 @@ func (m Model) treeTopRow() int {
 	return 1
 }
 
+// treePaneXRange returns the half-open screen column range [start, end) of the
+// tree pane block: left border + treeWidth content columns + right border.
+// the block hugs the right edge when the tree renders on the right.
+func (m Model) treePaneXRange() (start, end int) {
+	if m.cfg.treePosition == TreePositionRight {
+		start = m.layout.width - m.layout.treeWidth - 2
+	}
+	return start, start + m.layout.treeWidth + 2
+}
+
 // hitTest classifies a screen coordinate into a hitZone for mouse-event routing.
 // the classification is pure arithmetic over m.layout state and does not
 // inspect any dynamic UI content. ordering matters: status bar is checked
-// first (y at bottom), then x is used to split tree vs diff columns, and
-// finally y is used within each column to reject the diff header row or tree
+// first (y at bottom), then x is used to identify the configured tree side,
+// and finally y is used within each pane to reject the diff header row or tree
 // top border.
 func (m Model) hitTest(x, y int) hitZone {
 	if x < 0 || y < 0 || x >= m.layout.width || y >= m.layout.height {
@@ -111,10 +121,7 @@ func (m Model) hitTest(x, y int) hitZone {
 		return hitNone
 	}
 
-	// tree block spans columns [0, treeWidth+1] when visible: left border +
-	// treeWidth content columns + right border = treeWidth+2 columns total.
-	// diff block picks up at column treeWidth+2.
-	if !m.treePaneHidden() && x < m.layout.treeWidth+2 {
+	if start, end := m.treePaneXRange(); !m.treePaneHidden() && x >= start && x < end {
 		if y < m.treeTopRow() {
 			return hitNone
 		}
@@ -197,7 +204,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // handleOverlayMouse routes a mouse event to the active overlay. wheel events
 // drive the overlay's own scroll/cursor navigation; clicks and other buttons
 // are consumed so they don't leak through to the panes underneath. outcomes
-// that need model-side side effects (annotation jump, theme preview/confirm)
+// that need model-side side effects (annotation/file jump, theme preview/confirm)
 // are dispatched through the same helpers as the keyboard path. Canceled and
 // Closed branches mirror the keyboard dispatch for symmetry but the current
 // overlay mouse handlers never emit them — a mouse click either confirms
@@ -213,6 +220,8 @@ func (m Model) handleOverlayMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.confirmThemeByName(out.ThemeChoice.Name)
 	case overlay.OutcomeThemeCanceled:
 		m.cancelThemeSelect()
+	case overlay.OutcomeFileChosen:
+		return m.jumpToFile(out.FileChoice.Path)
 	case overlay.OutcomeClosed, overlay.OutcomeNone:
 	}
 	return m, nil

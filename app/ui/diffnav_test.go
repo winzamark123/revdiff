@@ -7,6 +7,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -508,6 +510,192 @@ func TestModel_PgDownPgUpPreservesRelativeCursorPosition(t *testing.T) {
 		assert.Equal(t, midScreenRow, model.cursorViewportY()-model.layout.viewport.YOffset,
 			"wrap-mode pgup should preserve cursor's on-screen row")
 	})
+}
+
+func TestModel_PageOverlapCarriesRowsAcrossPages(t *testing.T) {
+	lines := make([]diff.DiffLine, 200)
+	for i := range lines {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "line", ChangeType: diff.ChangeAdd}
+	}
+
+	newModel := func(overlap int) Model {
+		m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+		m.modes.pageOverlap = overlap
+		result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+		model := result.(Model)
+		result, _ = model.Update(fileLoadedMsg{file: "a.go", lines: lines})
+		model = result.(Model)
+		model.layout.focus = paneDiff
+		return model
+	}
+
+	t.Run("zero overlap advances a full page", func(t *testing.T) {
+		model := newModel(0)
+		pageHeight := model.layout.viewport.Height
+		result, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		model = result.(Model)
+		assert.Equal(t, pageHeight, model.layout.viewport.YOffset)
+	})
+
+	t.Run("overlap keeps N rows on screen", func(t *testing.T) {
+		model := newModel(2)
+		pageHeight := model.layout.viewport.Height
+		result, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		model = result.(Model)
+		assert.Equal(t, pageHeight-2, model.layout.viewport.YOffset,
+			"the last 2 rows of the previous screen must be the first 2 of the new one")
+	})
+
+	t.Run("overlap applies to pgup as well", func(t *testing.T) {
+		model := newModel(2)
+		pageHeight := model.layout.viewport.Height
+		for range 2 {
+			result, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+			model = result.(Model)
+		}
+		downOffset := model.layout.viewport.YOffset
+		result, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+		model = result.(Model)
+		assert.Equal(t, downOffset-(pageHeight-2), model.layout.viewport.YOffset)
+	})
+
+	t.Run("half page motions ignore the overlap", func(t *testing.T) {
+		model := newModel(2)
+		pageHeight := model.layout.viewport.Height
+		result, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+		model = result.(Model)
+		assert.Equal(t, pageHeight/2, model.layout.viewport.YOffset,
+			"ctrl+d already retains half a screen, so the overlap must not shrink it further")
+	})
+
+	t.Run("overlap wider than the pane still advances", func(t *testing.T) {
+		model := newModel(1000)
+		result, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		model = result.(Model)
+		assert.Positive(t, model.layout.viewport.YOffset, "paging must never stall on an oversized overlap")
+	})
+}
+
+// a line taller than the remaining page budget must not make paging scroll past unseen rows:
+// the walk used to step onto it and then shift the viewport by the cursor's whole visual delta,
+// skipping the tail of an annotation that was never rendered.
+func TestModel_PagingDoesNotSkipRowsAtTallLineBoundary(t *testing.T) {
+	lines := make([]diff.DiffLine, 200)
+	for i := range lines {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "line", ChangeType: diff.ChangeAdd}
+	}
+
+	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	model := result.(Model)
+	result, _ = model.Update(fileLoadedMsg{file: "a.go", lines: lines})
+	model = result.(Model)
+	model.layout.focus = paneDiff
+
+	pageHeight := model.layout.viewport.Height
+	require.Positive(t, pageHeight)
+
+	// annotate the line one row short of the page edge with a body long enough to wrap
+	// several rows, so stepping off it crosses the page boundary in a single cursor step
+	boundary := pageHeight - 2
+	require.Positive(t, boundary)
+	model.store.Add(annotation.Annotation{File: "a.go", Line: boundary + 1, Type: string(diff.ChangeAdd),
+		Comment: strings.Repeat("some long annotation body ", 30)})
+	model.invalidateRenderCaches()
+
+	offsets := model.cursorVisualOffsets(model.findHunks(), model.buildAnnotationSet())
+	require.Greater(t, offsets[boundary+1]-offsets[boundary], 3,
+		"annotated line must be tall enough to overshoot the page budget")
+
+	startOffset := model.layout.viewport.YOffset
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	model = result.(Model)
+	assert.LessOrEqual(t, model.layout.viewport.YOffset-startOffset, pageHeight,
+		"pgdown must not advance the viewport by more than one page, or rows are skipped unseen")
+	assert.Greater(t, model.layout.viewport.YOffset, startOffset, "pgdown must still advance the viewport")
+
+	downOffset := model.layout.viewport.YOffset
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	model = result.(Model)
+	assert.LessOrEqual(t, downOffset-model.layout.viewport.YOffset, pageHeight,
+		"pgup must not retreat the viewport by more than one page, or rows are skipped unseen")
+}
+
+// a line taller than the whole viewport must stay reachable: the overshoot guard exempts the
+// first step, or paging would refuse to move and the cursor could never get past such a line.
+func TestModel_PagingAdvancesPastLineTallerThanPage(t *testing.T) {
+	lines := make([]diff.DiffLine, 200)
+	for i := range lines {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "line", ChangeType: diff.ChangeAdd}
+	}
+
+	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	model := result.(Model)
+	result, _ = model.Update(fileLoadedMsg{file: "a.go", lines: lines})
+	model = result.(Model)
+	model.layout.focus = paneDiff
+
+	pageHeight := model.layout.viewport.Height
+	model.store.Add(annotation.Annotation{File: "a.go", Line: 1, Type: string(diff.ChangeAdd),
+		Comment: strings.Repeat("a very long annotation body that wraps many times ", 40)})
+	model.invalidateRenderCaches()
+
+	offsets := model.cursorVisualOffsets(model.findHunks(), model.buildAnnotationSet())
+	require.Greater(t, offsets[1]-offsets[0], pageHeight,
+		"the annotated line must be taller than a full page for this to exercise the exemption")
+
+	startOffset := model.layout.viewport.YOffset
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	model = result.(Model)
+	assert.GreaterOrEqual(t, model.layout.viewport.YOffset-startOffset, pageHeight/2,
+		"pgdown must not collapse to a near-zero scroll when the block ahead is taller than the page")
+
+	for range 2 {
+		result, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		model = result.(Model)
+	}
+	assert.Positive(t, model.nav.diffCursor, "paging must get past a line taller than the viewport")
+}
+
+// the upward walk rolls back its overshooting step too: without it, pgup across a tall
+// annotated line retreats the viewport by the line's whole height, past rows never rendered.
+func TestModel_PgUpDoesNotSkipRowsAtTallLineBoundary(t *testing.T) {
+	lines := make([]diff.DiffLine, 200)
+	for i := range lines {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "line", ChangeType: diff.ChangeAdd}
+	}
+
+	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	model := result.(Model)
+	result, _ = model.Update(fileLoadedMsg{file: "a.go", lines: lines})
+	model = result.(Model)
+	model.layout.focus = paneDiff
+
+	pageHeight := model.layout.viewport.Height
+	const tall = 40
+	model.store.Add(annotation.Annotation{File: "a.go", Line: tall + 1, Type: string(diff.ChangeAdd),
+		Comment: strings.Repeat("some long annotation body ", 30)})
+	model.invalidateRenderCaches()
+
+	offsets := model.cursorVisualOffsets(model.findHunks(), model.buildAnnotationSet())
+	require.Greater(t, offsets[tall+1]-offsets[tall], 3,
+		"annotated line must be tall enough to overshoot the page budget")
+
+	// park the cursor just over half a page below the tall line, so the walk up has spent
+	// enough budget to make the rollback worthwhile by the time it reaches the annotation
+	model.nav.diffCursor = tall + pageHeight/2 + 1
+	model.syncViewportToCursor()
+	require.Greater(t, model.layout.viewport.YOffset, pageHeight,
+		"viewport must be far enough down that an over-page retreat would not clamp at zero")
+
+	startOffset := model.layout.viewport.YOffset
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	model = result.(Model)
+	assert.LessOrEqual(t, startOffset-model.layout.viewport.YOffset, pageHeight,
+		"pgup must not retreat the viewport by more than one page, or rows are skipped unseen")
+	assert.Less(t, model.layout.viewport.YOffset, startOffset, "pgup must still retreat the viewport")
 }
 
 // on annotated lines the cursor must stay visible within the viewport after pgdown/pgup,
@@ -2128,11 +2316,13 @@ func TestModel_ScrollBlockedInWrapMode(t *testing.T) {
 	assert.Equal(t, 0, model.layout.scrollX)
 }
 func TestModel_ScrollWorksWithoutWrapMode(t *testing.T) {
-	lines := []diff.DiffLine{{ChangeType: diff.ChangeContext, Content: "x", NewNum: 1}}
+	wide := strings.Repeat("x", 300) // must overflow the pane, or the clamp correctly refuses to scroll
+	lines := []diff.DiffLine{{ChangeType: diff.ChangeContext, Content: wide, NewNum: 1}}
 	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
 	m.file.name = "a.go"
 	m.file.lines = lines
-	m.file.highlighted = []string{"x"}
+	m.file.highlighted = []string{wide}
+	m.layout.width = 80
 	m.layout.focus = paneDiff
 	m.layout.viewport.Width = 80
 	m.layout.viewport.Height = 20
@@ -3225,4 +3415,281 @@ func TestModel_JKScrollDiffNoOpWhenContentFits(t *testing.T) {
 			assert.Equal(t, "a.go", model.tree.SelectedFile())
 		})
 	}
+}
+
+func BenchmarkModel_PageNavigation(b *testing.B) {
+	lines := make([]diff.DiffLine, 10_000)
+	for i := range lines {
+		lines[i] = diff.DiffLine{
+			NewNum:     i + 1,
+			Content:    "func pageNavigationBenchmark() {}",
+			ChangeType: diff.ChangeContext,
+		}
+	}
+
+	m := testModel([]string{"large.go"}, map[string][]diff.DiffLine{"large.go": lines})
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 44})
+	model := result.(Model)
+	result, _ = model.Update(fileLoadedMsg{file: "large.go", lines: lines})
+	model = result.(Model)
+	model.layout.focus = paneDiff
+	model.nav.diffCursor = len(lines) / 2
+	model.layout.viewport.SetContent(model.renderDiff())
+	model.layout.viewport.SetYOffset(model.nav.diffCursor)
+
+	b.ResetTimer()
+	for i := range b.N {
+		if i%2 == 0 {
+			model.moveDiffCursorPageDown()
+		} else {
+			model.moveDiffCursorPageUp()
+		}
+	}
+}
+
+func TestModel_DownPageMotionTerminatesOnAnnotatedLastLine(t *testing.T) {
+	// the downward walk used to spin forever once it reached a final navigable line carrying an
+	// annotation: moveDiffCursorDownWithHunks alternates cursorOnAnnotation false->true (annotation
+	// stop) then true->false (no next line found), so comparing only against the previous step never
+	// saw "no movement", and the visual delta oscillated by the diff line's own wrapped height
+	// (cursorViewportYFromOffsets adds wrappedLineCount(diffCursor) when the flag is set), which stayed
+	// inside the rows budget in these cases so that check never tripped either.
+	newModel := func(cursor int, onAnnot, trailingDivider bool) Model {
+		lines := make([]diff.DiffLine, 0, 21)
+		for i := range 20 {
+			lines = append(lines, diff.DiffLine{NewNum: i + 1, Content: "ctx", ChangeType: diff.ChangeContext})
+		}
+		if trailingDivider {
+			// compact mode leaves a non-navigable divider after the last real line
+			lines = append(lines, diff.DiffLine{Content: "⋯ 12 lines ⋯", ChangeType: diff.ChangeDivider})
+		}
+		m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+		result, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+		model := result.(Model)
+		result, _ = model.Update(fileLoadedMsg{file: "a.go", lines: lines})
+		model = result.(Model)
+		model.layout.focus = paneDiff
+		// annotate the last navigable line, which is the last context row whether or not a
+		// non-navigable divider follows it
+		model.store.Add(annotation.Annotation{File: "a.go", Line: model.diffLineNum(lines[19]),
+			Type: string(diff.ChangeContext), Comment: "note on the last line"})
+		model.invalidateRenderCaches()
+		model.nav.diffCursor, model.annot.cursorOnAnnotation = cursor, onAnnot
+		return model
+	}
+
+	tests := []struct {
+		name            string
+		cursor          int
+		onAnnot         bool
+		trailingDivider bool
+		motion          func(*Model)
+	}{
+		{"page down parked on last line", 19, false, false, (*Model).moveDiffCursorPageDown},
+		{"page down parked on last annotation", 19, true, false, (*Model).moveDiffCursorPageDown},
+		{"page down walking into last line", 5, false, false, (*Model).moveDiffCursorPageDown},
+		{"half page down parked on last line", 19, false, false, (*Model).moveDiffCursorHalfPageDown},
+		{"half page down walking into last line", 12, false, false, (*Model).moveDiffCursorHalfPageDown},
+		{"page down with trailing divider", 19, false, true, (*Model).moveDiffCursorPageDown},
+		{"page down walking into trailing divider", 5, false, true, (*Model).moveDiffCursorPageDown},
+		{"half page down with trailing divider", 19, true, true, (*Model).moveDiffCursorHalfPageDown},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			model := newModel(tc.cursor, tc.onAnnot, tc.trailingDivider)
+			done := make(chan struct{})
+			go func() { defer close(done); tc.motion(&model) }()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("page motion never returned - the walk is not terminating")
+			}
+			assert.Equal(t, 19, model.nav.diffCursor, "walk must settle on the last navigable line")
+			assert.True(t, model.annot.cursorOnAnnotation, "cursor must park on the annotation sub-row, not fall back to the diff row")
+		})
+	}
+}
+
+// clampTestModel builds a diff-pane model with a hidden tree and a known content width,
+// with lineWidths populated the way handleFileLoaded populates it.
+func clampTestModel(t *testing.T, lines []diff.DiffLine, width int) Model {
+	t.Helper()
+	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+	m.layout.width = width
+	m.layout.height = 24
+	m.layout.treeHidden = true
+	m.layout.focus = paneDiff
+	m.layout.viewport.Width = width - 4
+	m.layout.viewport.Height = 20
+	m.file.name = "a.go"
+	m.file.lines = lines
+	m.file.highlighted = make([]string, len(lines))
+	for i, dl := range lines {
+		m.file.highlighted[i] = dl.Content
+	}
+	m.file.lineWidths = m.computeLineWidths()
+	return m
+}
+
+func TestModel_ComputeLineWidths(t *testing.T) {
+	tests := []struct {
+		name string
+		line diff.DiffLine
+		want int
+	}{
+		{"context row carries the three-column prefix", diff.DiffLine{ChangeType: diff.ChangeContext, Content: "abc"}, 6},
+		{"added row carries the three-column prefix", diff.DiffLine{ChangeType: diff.ChangeAdd, Content: "abcd"}, 7},
+		{"removed row carries the three-column prefix", diff.DiffLine{ChangeType: diff.ChangeRemove, Content: "ab"}, 5},
+		{"divider row carries a single leading space", diff.DiffLine{ChangeType: diff.ChangeDivider, Content: "abc"}, 4},
+		{"wide runes count two columns each", diff.DiffLine{ChangeType: diff.ChangeContext, Content: "世界"}, 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := clampTestModel(t, []diff.DiffLine{tt.line}, 200)
+			assert.Equal(t, tt.want, m.file.lineWidths[0])
+		})
+	}
+}
+
+func TestModel_ComputeLineWidthsExpandsTabs(t *testing.T) {
+	m := clampTestModel(t, []diff.DiffLine{{ChangeType: diff.ChangeContext, Content: "\tx"}}, 200)
+	assert.Equal(t, changePrefixWidth+len(m.cfg.tabSpaces)+1, m.file.lineWidths[0])
+}
+
+func TestModel_HorizontalScrollStopsWithContentVisible(t *testing.T) {
+	wide := strings.Repeat("x", 100) + "ENDTOKEN"
+	m := clampTestModel(t, []diff.DiffLine{{ChangeType: diff.ChangeContext, Content: wide, NewNum: 1}}, 40)
+
+	for range 200 {
+		m.handleHorizontalScroll(1)
+	}
+
+	assert.Equal(t, m.maxHorizontalScroll(), m.layout.scrollX, "scroll must stop at the bound")
+	stripped := ansi.Strip(m.renderDiff())
+	assert.Contains(t, stripped, "ENDTOKEN", "the widest row's tail must stay visible at the bound")
+	assert.NotContains(t, stripped, "»", "nothing is left off the right edge at the bound")
+}
+
+func TestModel_HorizontalScrollLeftClampsAtZero(t *testing.T) {
+	wide := strings.Repeat("x", 100)
+	m := clampTestModel(t, []diff.DiffLine{{ChangeType: diff.ChangeContext, Content: wide, NewNum: 1}}, 40)
+
+	for range 50 {
+		m.handleHorizontalScroll(-1)
+	}
+	assert.Equal(t, 0, m.layout.scrollX)
+}
+
+func TestModel_HorizontalScrollBoundIgnoresCollapsedHiddenLine(t *testing.T) {
+	lines := []diff.DiffLine{
+		{ChangeType: diff.ChangeRemove, Content: strings.Repeat("r", 400), OldNum: 1},
+		{ChangeType: diff.ChangeAdd, Content: "short add", NewNum: 1},
+	}
+	m := clampTestModel(t, lines, 40)
+
+	expandedBound := m.maxHorizontalScroll()
+	m.modes.collapsed.enabled = true
+	collapsedBound := m.maxHorizontalScroll()
+
+	assert.Positive(t, expandedBound, "the wide removed line is rendered when not collapsed")
+	assert.Equal(t, 0, collapsedBound, "a hidden removed line must not widen the bound")
+}
+
+func TestModel_HorizontalScrollBoundFollowsHunkExpansion(t *testing.T) {
+	lines := []diff.DiffLine{
+		{ChangeType: diff.ChangeRemove, Content: strings.Repeat("r", 400), OldNum: 1},
+		{ChangeType: diff.ChangeAdd, Content: "short add", NewNum: 1},
+	}
+	m := clampTestModel(t, lines, 40)
+	m.modes.collapsed.enabled = true
+
+	hidden := m.maxHorizontalScroll()
+	m.modes.collapsed.expandedHunks = map[int]bool{0: true}
+	expanded := m.maxHorizontalScroll()
+	m.modes.collapsed.expandedHunks = map[int]bool{}
+	rehidden := m.maxHorizontalScroll()
+
+	assert.Equal(t, 0, hidden)
+	assert.Positive(t, expanded, "expanding the hunk reveals the wide removed line")
+	assert.Equal(t, 0, rehidden, "re-collapsing hides it again")
+}
+
+func TestModel_HorizontalScrollBoundCountsDeletePlaceholder(t *testing.T) {
+	lines := []diff.DiffLine{
+		{ChangeType: diff.ChangeRemove, Content: "gone", OldNum: 1},
+		{ChangeType: diff.ChangeRemove, Content: "gone too", OldNum: 2},
+	}
+	m := clampTestModel(t, lines, 20)
+	m.modes.collapsed.enabled = true
+
+	want := changePrefixWidth + lipgloss.Width(m.deletePlaceholderText(0))
+	assert.Equal(t, want, m.maxRenderedContentWidth())
+}
+
+func TestModel_HorizontalScrollReclampsWhenGutterShrinks(t *testing.T) {
+	wide := strings.Repeat("x", 100)
+	m := clampTestModel(t, []diff.DiffLine{{ChangeType: diff.ChangeContext, Content: wide, NewNum: 1}}, 40)
+	m.modes.lineNumbers = true
+	m.file.lineNumWidth = m.computeLineNumWidth()
+
+	for range 200 {
+		m.handleHorizontalScroll(1)
+	}
+	withNumbers := m.layout.scrollX
+
+	m.toggleLineNumbers()
+	assert.Less(t, m.layout.scrollX, withNumbers, "offset must follow the bound down")
+	assert.Equal(t, m.maxHorizontalScroll(), m.layout.scrollX)
+}
+
+func TestModel_HorizontalScrollReclampsOnCollapsedToggle(t *testing.T) {
+	lines := []diff.DiffLine{
+		{ChangeType: diff.ChangeRemove, Content: strings.Repeat("r", 400), OldNum: 1},
+		{ChangeType: diff.ChangeAdd, Content: "short add", NewNum: 1},
+	}
+	m := clampTestModel(t, lines, 40)
+
+	for range 200 {
+		m.handleHorizontalScroll(1)
+	}
+	scrolled := m.layout.scrollX
+	require.Positive(t, scrolled)
+
+	m.toggleCollapsedMode()
+
+	assert.Equal(t, 0, m.layout.scrollX, "hiding the widest row must pull the offset back in")
+	assert.Contains(t, ansi.Strip(m.renderDiff()), "short add", "the pane must not blank")
+}
+
+func TestModel_HorizontalScrollReclampsOnHunkRecollapse(t *testing.T) {
+	lines := []diff.DiffLine{
+		{ChangeType: diff.ChangeRemove, Content: strings.Repeat("r", 400), OldNum: 1},
+		{ChangeType: diff.ChangeAdd, Content: "short add", NewNum: 1},
+	}
+	m := clampTestModel(t, lines, 40)
+	m.modes.collapsed.enabled = true
+	m.modes.collapsed.expandedHunks = map[int]bool{0: true}
+	m.nav.diffCursor = 0
+
+	for range 200 {
+		m.handleHorizontalScroll(1)
+	}
+	require.Positive(t, m.layout.scrollX)
+
+	m.toggleHunkExpansion()
+
+	assert.Equal(t, 0, m.layout.scrollX, "re-hiding the expanded row must pull the offset back in")
+	assert.Contains(t, ansi.Strip(m.renderDiff()), "short add", "the pane must not blank")
+}
+
+func TestModel_HorizontalScrollHealsMissingWidthCache(t *testing.T) {
+	wide := strings.Repeat("x", 100)
+	m := clampTestModel(t, []diff.DiffLine{{ChangeType: diff.ChangeContext, Content: wide, NewNum: 1}}, 40)
+	m.file.lineWidths = nil
+
+	m.handleHorizontalScroll(1)
+
+	assert.Len(t, m.file.lineWidths, 1, "the cache is rebuilt rather than left empty")
+	assert.Equal(t, scrollStep, m.layout.scrollX, "a missing cache must not disable horizontal scroll")
 }

@@ -1838,6 +1838,21 @@ func TestModel_HandleFileLoaded_DropsStaleCompactAnchor(t *testing.T) {
 	assert.Equal(t, 1, model.nav.diffCursor, "stale anchor must not reposition; cursor resets to first visible line")
 }
 
+func TestModel_HandleFileLoaded_PopulatesLineWidths(t *testing.T) {
+	m := testModel([]string{"a.go"}, nil)
+	m.file.name = "a.go"
+	msg := fileLoadedMsg{file: "a.go", seq: 0, lines: []diff.DiffLine{
+		{NewNum: 1, Content: "abc", ChangeType: diff.ChangeContext},
+		{NewNum: 2, Content: "much longer line here", ChangeType: diff.ChangeAdd},
+	}}
+	result, _ := m.handleFileLoaded(msg)
+	model := result.(Model)
+
+	require.Len(t, model.file.lineWidths, 2, "widths must stay parallel to lines")
+	assert.Equal(t, changePrefixWidth+3, model.file.lineWidths[0])
+	assert.Equal(t, changePrefixWidth+21, model.file.lineWidths[1])
+}
+
 func TestModel_LoadFilesReconcilesReviewedFingerprints(t *testing.T) {
 	entry := diff.FileEntry{Path: "a.go", Status: diff.FileModified}
 	original := []diff.DiffLine{
@@ -2082,4 +2097,210 @@ func TestModel_FilesReloadPreservesVisibleRowWhenFilesAboveChange(t *testing.T) 
 	assert.Equal(t, "f.go", m.tree.SelectedFile())
 	require.True(t, m.tree.SelectByVisibleRow(2))
 	require.Equal(t, "f.go", m.tree.SelectedFile(), "reload should preserve the row when files above disappear")
+}
+
+func TestModel_HandleFileLoaded_StartAtChange(t *testing.T) {
+	withChange := []diff.DiffLine{
+		{ChangeType: diff.ChangeDivider},
+		{OldNum: 40, NewNum: 40, Content: "ctx", ChangeType: diff.ChangeContext},
+		{OldNum: 41, NewNum: 41, Content: "ctx", ChangeType: diff.ChangeContext},
+		{NewNum: 42, Content: "add", ChangeType: diff.ChangeAdd},
+		{OldNum: 42, NewNum: 43, Content: "ctx", ChangeType: diff.ChangeContext},
+	}
+
+	load := func(t *testing.T, on bool, lines []diff.DiffLine, prep func(m *Model)) Model {
+		t.Helper()
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.cfg.startAtChange = on
+		if prep != nil {
+			prep(&m)
+		}
+		result, _ := m.handleFileLoaded(fileLoadedMsg{file: "a.go", seq: m.file.loadSeq, lines: lines})
+		return result.(Model)
+	}
+
+	t.Run("off keeps the first visible line", func(t *testing.T) {
+		assert.Equal(t, 1, load(t, false, withChange, nil).nav.diffCursor)
+	})
+
+	t.Run("on lands on the first changed line", func(t *testing.T) {
+		assert.Equal(t, 3, load(t, true, withChange, nil).nav.diffCursor)
+	})
+
+	t.Run("context-only file falls back to the first visible line", func(t *testing.T) {
+		contextOnly := []diff.DiffLine{
+			{ChangeType: diff.ChangeDivider},
+			{OldNum: 1, NewNum: 1, Content: "ctx", ChangeType: diff.ChangeContext},
+			{OldNum: 2, NewNum: 2, Content: "ctx", ChangeType: diff.ChangeContext},
+		}
+		assert.Equal(t, 1, load(t, true, contextOnly, nil).nav.diffCursor)
+	})
+
+	t.Run("empty diff leaves the cursor at zero", func(t *testing.T) {
+		assert.Equal(t, 0, load(t, true, nil, nil).nav.diffCursor)
+	})
+
+	t.Run("collapsed delete-only hunk keeps its placeholder", func(t *testing.T) {
+		deleteFirst := []diff.DiffLine{
+			{OldNum: 1, NewNum: 1, Content: "ctx", ChangeType: diff.ChangeContext},
+			{OldNum: 2, Content: "gone", ChangeType: diff.ChangeRemove},
+			{OldNum: 3, NewNum: 2, Content: "ctx", ChangeType: diff.ChangeContext},
+			{NewNum: 3, Content: "add", ChangeType: diff.ChangeAdd},
+		}
+		m := load(t, true, deleteFirst, func(m *Model) { m.modes.collapsed.enabled = true })
+		assert.Equal(t, 1, m.nav.diffCursor)
+	})
+
+	t.Run("pending hunk jump wins", func(t *testing.T) {
+		back := false
+		m := load(t, true, withChange, func(m *Model) { m.nav.pendingHunkJump = &back })
+		assert.Equal(t, 3, m.nav.diffCursor)
+		assert.Nil(t, m.nav.pendingHunkJump)
+	})
+
+	t.Run("compact anchor wins", func(t *testing.T) {
+		m := load(t, true, withChange, func(m *Model) {
+			m.compact.pendingAnchor = &compactAnchor{seq: m.file.loadSeq, srcLine: 41, changeType: diff.ChangeContext, hunkIdx: 0}
+		})
+		assert.Equal(t, 2, m.nav.diffCursor, "anchor restores the pre-toggle line, overriding start-at-change")
+	})
+
+	t.Run("reapplies on every subsequent file load", func(t *testing.T) {
+		m := load(t, true, withChange, nil)
+		require.Equal(t, 3, m.nav.diffCursor)
+		m.file.name = "b.go"
+		m.file.loadSeq++
+		result, _ := m.handleFileLoaded(fileLoadedMsg{file: "b.go", seq: m.file.loadSeq, lines: withChange})
+		assert.Equal(t, 3, result.(Model).nav.diffCursor, "switching files positions again, not once per session")
+	})
+
+	t.Run("annotation jump wins", func(t *testing.T) {
+		m := load(t, true, withChange, func(m *Model) {
+			m.pendingAnnotJump = &annotation.Annotation{File: "a.go", Line: 41, Type: string(diff.ChangeContext)}
+		})
+		assert.Equal(t, 2, m.nav.diffCursor, "annotation target overrides start-at-change")
+		assert.Nil(t, m.pendingAnnotJump)
+	})
+
+	// fileLoadedMsg can arrive before the first WindowSizeMsg; the change must still be on
+	// screen once the resize lands, not merely selected somewhere far below the fold
+	t.Run("change is visible when the window size arrives after the load", func(t *testing.T) {
+		lines := make([]diff.DiffLine, 0, 401)
+		for i := 1; i <= 400; i++ {
+			lines = append(lines, diff.DiffLine{OldNum: i, NewNum: i, Content: "ctx", ChangeType: diff.ChangeContext})
+		}
+		lines = append(lines, diff.DiffLine{NewNum: 401, Content: "add", ChangeType: diff.ChangeAdd})
+
+		m := testModel([]string{"a.go"}, nil)
+		m.file.name = "a.go"
+		m.cfg.startAtChange = true
+		m.ready = false
+		m.layout.viewport.Height = 0
+
+		result, _ := m.handleFileLoaded(fileLoadedMsg{file: "a.go", seq: m.file.loadSeq, lines: lines})
+		m = result.(Model)
+		require.Equal(t, 400, m.nav.diffCursor, "cursor lands on the change with no viewport height yet")
+
+		result, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+		m = result.(Model)
+
+		cursorY, top, height := m.cursorViewportY(), m.layout.viewport.YOffset, m.layout.viewport.Height
+		require.Positive(t, height)
+		assert.GreaterOrEqual(t, cursorY, top, "change must not sit above the visible window")
+		assert.Less(t, cursorY, top+height, "change must not sit below the visible window")
+	})
+}
+
+// pins the centerViewportOnCursor call in the start-at-change branch of handleFileLoaded. it is the
+// only render on the no-hunk path, and on the hunk path it is what re-applies an offset that
+// centerHunkInViewport clamped against the previous file's length. deleting it as a duplicate render
+// leaves the pane painting the old file.
+func TestModel_StartAtChange_RendersTheLoadedFile(t *testing.T) {
+	short := []diff.DiffLine{{OldNum: 1, NewNum: 1, Content: "short file", ChangeType: diff.ChangeContext}}
+
+	// testModel leaves the viewport zero-sized, and a zero-height viewport renders "" — which would
+	// make every assertion below pass against an unrendered pane
+	newModel := func(t *testing.T, files []string) Model {
+		t.Helper()
+		m := testModel(files, nil)
+		m.cfg.startAtChange = true
+		m.layout.viewport.Width, m.layout.viewport.Height = 80, 20
+		return m
+	}
+
+	load := func(t *testing.T, m Model, file string, lines []diff.DiffLine) Model {
+		t.Helper()
+		m.file.name = file
+		m.file.loadSeq++
+		result, _ := m.handleFileLoaded(fileLoadedMsg{file: file, seq: m.file.loadSeq, lines: lines})
+		return result.(Model)
+	}
+
+	t.Run("context-only file replaces the previous file's content", func(t *testing.T) {
+		m := newModel(t, []string{"a.go", "b.md"})
+		m = load(t, m, "a.go", []diff.DiffLine{
+			{OldNum: 1, NewNum: 1, Content: "first file only", ChangeType: diff.ChangeContext},
+		})
+
+		m = load(t, m, "b.md", []diff.DiffLine{
+			{OldNum: 1, NewNum: 1, Content: "second file only", ChangeType: diff.ChangeContext},
+		})
+
+		painted := m.layout.viewport.View()
+		assert.Contains(t, painted, "second file only", "the pane must paint the file that just loaded")
+		assert.NotContains(t, painted, "first file only", "stale content from the previous file must be gone")
+	})
+
+	t.Run("offset survives a short previous file", func(t *testing.T) {
+		lines := make([]diff.DiffLine, 0, 401)
+		for i := 1; i <= 400; i++ {
+			lines = append(lines, diff.DiffLine{OldNum: i, NewNum: i, Content: "ctx", ChangeType: diff.ChangeContext})
+		}
+		lines = append(lines, diff.DiffLine{NewNum: 401, Content: "the change", ChangeType: diff.ChangeAdd})
+
+		m := newModel(t, []string{"a.go", "b.go"})
+		m = load(t, m, "a.go", short)
+		require.Zero(t, m.layout.viewport.YOffset, "the short file leaves the viewport at the top")
+
+		m = load(t, m, "b.go", lines)
+
+		require.Equal(t, 400, m.nav.diffCursor)
+		assert.Positive(t, m.layout.viewport.YOffset,
+			"offset must be re-applied after the new content is installed, not clamped against the short file")
+		assert.Contains(t, m.layout.viewport.View(), "the change", "the change must actually be on screen")
+	})
+}
+
+// a markdown TOC is built only for full-context files, which by definition carry no hunks, so
+// start-at-change cannot move the cursor out from under the TOC's active section.
+func TestModel_StartAtChange_MarkdownTOCUnaffected(t *testing.T) {
+	load := func(t *testing.T, lines []diff.DiffLine) Model {
+		t.Helper()
+		m := testModel([]string{"a.md"}, nil)
+		m.file.name = "a.md"
+		m.file.singleFile = true
+		m.cfg.startAtChange = true
+		result, _ := m.handleFileLoaded(fileLoadedMsg{file: "a.md", seq: m.file.loadSeq, lines: lines})
+		return result.(Model)
+	}
+
+	t.Run("full-context markdown keeps its TOC and its top cursor", func(t *testing.T) {
+		m := load(t, []diff.DiffLine{
+			{OldNum: 1, NewNum: 1, Content: "# One", ChangeType: diff.ChangeContext},
+			{OldNum: 2, NewNum: 2, Content: "body", ChangeType: diff.ChangeContext},
+			{OldNum: 3, NewNum: 3, Content: "## Two", ChangeType: diff.ChangeContext},
+		})
+		require.NotNil(t, m.file.mdTOC, "full-context markdown must still build a TOC")
+		assert.Equal(t, 0, m.nav.diffCursor, "no hunks means the fallback keeps the top position")
+	})
+
+	t.Run("changed markdown builds no TOC", func(t *testing.T) {
+		m := load(t, []diff.DiffLine{
+			{OldNum: 1, NewNum: 1, Content: "# One", ChangeType: diff.ChangeContext},
+			{NewNum: 2, Content: "## Two", ChangeType: diff.ChangeAdd},
+		})
+		assert.Nil(t, m.file.mdTOC, "a diff with changes is not full-context, so no TOC exists to go stale")
+		assert.Equal(t, 1, m.nav.diffCursor)
+	})
 }

@@ -36,9 +36,12 @@ const (
 	ActionScrollDiffUp     Action = "scroll_diff_up"
 	ActionNextItem         Action = "next_item"
 	ActionPrevItem         Action = "prev_item"
+	ActionJumpFile         Action = "jump_file"
 	ActionNextHunk         Action = "next_hunk"
 	ActionPrevHunk         Action = "prev_hunk"
 	ActionTogglePane       Action = "toggle_pane"
+	ActionFocusLeft        Action = "focus_left"
+	ActionFocusRight       Action = "focus_right"
 	ActionFocusTree        Action = "focus_tree"
 	ActionFocusDiff        Action = "focus_diff"
 	ActionSearch           Action = "search"
@@ -82,8 +85,10 @@ var validActions = map[Action]bool{
 	ActionScrollLeft: true, ActionScrollRight: true,
 	ActionScrollCenter: true, ActionScrollTop: true, ActionScrollBottom: true,
 	ActionScrollDiffDown: true, ActionScrollDiffUp: true,
-	ActionNextItem: true, ActionPrevItem: true, ActionNextHunk: true, ActionPrevHunk: true,
-	ActionTogglePane: true, ActionFocusTree: true, ActionFocusDiff: true,
+	ActionNextItem: true, ActionPrevItem: true, ActionJumpFile: true,
+	ActionNextHunk: true, ActionPrevHunk: true,
+	ActionTogglePane: true, ActionFocusLeft: true, ActionFocusRight: true,
+	ActionFocusTree: true, ActionFocusDiff: true,
 	ActionSearch:  true,
 	ActionConfirm: true, ActionAnnotateFile: true, ActionDeleteAnnotation: true, ActionAnnotList: true,
 	ActionNextAnnotation: true, ActionPrevAnnotation: true,
@@ -203,12 +208,15 @@ func defaultDescriptions() []HelpEntry {
 		// file/hunk
 		{ActionNextItem, "next file / search match", "File/Hunk"},
 		{ActionPrevItem, "prev file / search match", "File/Hunk"},
+		{ActionJumpFile, "jump to file", "File/Hunk"},
 		{ActionNextHunk, "next hunk", "File/Hunk"},
 		{ActionPrevHunk, "prev hunk", "File/Hunk"},
 		{ActionOpenFileInEditor, "open focused file in $EDITOR", "File/Hunk"},
 
 		// pane
 		{ActionTogglePane, "toggle pane focus", SectionPane},
+		{ActionFocusLeft, "focus left pane", SectionPane},
+		{ActionFocusRight, "focus right pane", SectionPane},
 		{ActionFocusTree, "focus tree pane", SectionPane},
 		{ActionFocusDiff, "focus diff pane", SectionPane},
 
@@ -270,12 +278,13 @@ func defaultBindings() map[string]Action {
 		"n":      ActionNextItem,
 		"N":      ActionPrevItem,
 		"p":      ActionPrevItem,
+		"P":      ActionJumpFile,
 		"]":      ActionNextHunk,
 		"[":      ActionPrevHunk,
 		"e":      ActionOpenFileInEditor,
 		"tab":    ActionTogglePane,
-		"h":      ActionFocusTree,
-		"l":      ActionFocusDiff,
+		"h":      ActionFocusLeft,
+		"l":      ActionFocusRight,
 		"/":      ActionSearch,
 		"a":      ActionConfirm,
 		"enter":  ActionConfirm,

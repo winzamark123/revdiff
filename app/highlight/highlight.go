@@ -4,13 +4,34 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
+	"github.com/dlclark/regexp2/v2"
 
 	"github.com/umputun/revdiff/app/diff"
 )
+
+// maxBacktrackingStack raises regexp2's default 100k-slot cap for long single-line tokens. The
+// 40k-character Go string that exposed the regression needs 240,045 slots, leaving about four
+// times headroom. Each slot is an int, so one million slots allow about 8 MB for runtrack on
+// 64-bit targets. regexp2 caps only runtrack; runstack grows through doubleIntSlice with no limit
+// check, so the two stacks together can use roughly twice the nominal runtrack budget.
+//
+// Chroma compiles lexer rules with a bare regexp2.Compile and sets a separate 250ms MatchTimeout on
+// each rule. matchRules ignores either error and tries later rules, so affected text can lose its
+// intended color or fall back to chroma.Error. Raising this cap cannot help once the timeout is the
+// binding ceiling. This finite budget does not restore regexp2's former unbounded behavior, and
+// larger tokens can still exceed either ceiling.
+const maxBacktrackingStack = 1_000_000
+
+// chroma defers rule compilation until a lexer is first used, and a Highlighter is the only way
+// into that path, so raising the package default here reaches every lexer revdiff builds.
+var raiseBacktrackingCap = sync.OnceFunc(func() {
+	regexp2.DefaultOptimizationOptions.MaxBacktrackingStackSize = maxBacktrackingStack
+})
 
 // chromaFallbackStyle is the name of the Chroma style that doubles as styles.Fallback.
 // styles.Get returns Fallback for unknown names, but "swapoff" is a real built-in style
@@ -24,8 +45,11 @@ type Highlighter struct {
 }
 
 // New creates a Highlighter with the given Chroma style name and enabled state.
-// if styleName is empty, defaults to "monokai". Logs a warning if the style name is unknown.
+// If styleName is empty, defaults to "monokai". Logs a warning if the style name is unknown.
+// It also changes regexp2.DefaultOptimizationOptions.MaxBacktrackingStackSize process-wide before
+// Chroma compiles lexer rules.
 func New(styleName string, enabled bool) *Highlighter {
+	raiseBacktrackingCap()
 	if styleName == "" {
 		styleName = "monokai"
 	}

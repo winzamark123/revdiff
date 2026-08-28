@@ -89,16 +89,6 @@ cat /tmp/feature.patch | $SCRIPT_DIR/launch-revdiff.sh --stdin
 
 ## Workflow
 
-### Step 0: Verify Installation
-
-```bash
-which revdiff
-```
-
-If not found, guide installation:
-- `brew install umputun/apps/revdiff`
-- Binary releases: https://github.com/umputun/revdiff/releases
-
 ### Step 1: Determine Review Mode
 
 **All-files mode**: If `$ARGUMENTS` matches "all files", "all-files", or "browse all files" (with optional "exclude <prefix>" parts), use **all-files mode**:
@@ -148,6 +138,10 @@ When you are launching revdiff for the user (e.g., right after a refactor or ana
 
 **When the recent change likely created new untracked files** (new packages, new test files, new docs, new scripts that haven't been `git add`-ed yet), pass `--untracked` so those files appear in the tree. Use this in working-tree mode (no ref, no `--staged`); skip it for ref-to-ref reviews where untracked files are not part of the historical diff.
 
+Pass `--start-at-change` only when the user explicitly asks for that cursor preference; never infer it automatically.
+
+**When the user explicitly requests the file tree on a side**, pass `--tree-position=left` or `--tree-position=right`. Otherwise omit it and respect the user's config.
+
 Run the launcher script:
 
 ```bash
@@ -158,13 +152,15 @@ $SCRIPT_DIR/launch-revdiff.sh [base] [against] [--staged] [--untracked] [--only=
 
 **Disconnect-resilient tmux window mode**: when running under tmux, prefix the launcher with `REVDIFF_TMUX_WINDOW=1` to open revdiff in a persistent, server-owned tmux window instead of a client-owned `display-popup`. The review then survives a dropped SSH or tmux client — reattach and it is still there. This is a launcher environment variable, not a revdiff flag.
 
+**Pane-scoped overlay (agterm)**: when running in an agterm split, `REVDIFF_AGTERM_PANE=1` opens revdiff in the agent's own pane instead of over the whole session, leaving the sibling pane live and visible. The user sets it in the environment; it is ignored outside a split. This is a launcher environment variable, not a revdiff flag.
+
 The script:
 - Detects available terminal (agterm → tmux → Zellij → herdr → kitty → wezterm/Kaku → cmux → ghostty → iTerm2 → Emacs vterm)
 - Launches revdiff in an overlay
 - Captures annotation output to a temp file
 - Prints captured annotations to stdout
 
-The bundled launcher sets `REVDIFF_EXIT_CODE_ON_ANNOTATIONS`; exit `10` means annotations were captured and is not a launcher failure. Treat other nonzero statuses as failures.
+The bundled launcher sets `REVDIFF_EXIT_CODE_ON_ANNOTATIONS`; exit `10` means annotations were captured and is not a launcher failure. Treat other nonzero statuses as failures. On those failures the launcher relays revdiff's own stderr — report that text verbatim instead of guessing which argument was at fault.
 
 #### Agterm sessions and approval escalation
 
@@ -198,7 +194,7 @@ $SCRIPT_DIR/launch-revdiff.sh --only=<file>
    ```
 4. If the output file has content, process it as annotations below. If it is empty or missing, fall back to the durable review history, which survives even when the launcher's cleanup removed the temp file: run `$SCRIPT_DIR/read-latest-history.sh` and process the annotations from its `## Annotations` section (see "Using Existing Review History"). Only if both are empty did the user quit without annotating.
 
-This fallback is safe because revdiff writes the output file atomically on exit, and the history entry is complete before the process exits — there is never a partial read.
+Both reads return complete content: revdiff writes the output file atomically on exit, and the history entry is complete before the process exits. That guarantees no partial read, not that the file belongs to this review: with two reviews live under one `$TMPDIR`, the newest match may belong to the other one.
 
 A reviewer may also keep revdiff open on purpose and press `O` to flush the current annotations to the same output file mid-session, without quitting. The flush uses the same atomic write, so the fallback read above still returns a complete file. When the user says something like "I flushed my notes, go ahead" while the overlay is still open, read the most recent output file exactly as in the timeout fallback and process the annotations; do NOT relaunch revdiff. After you finish the code changes, the reviewer reloads with `R` and continues in the same session. No launcher flags change for this — the launcher already passes an output file, and `O` reuses it.
 

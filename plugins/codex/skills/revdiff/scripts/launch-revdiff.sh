@@ -18,7 +18,8 @@ fi
 
 TMPBASE="${TMPDIR:-/tmp}"
 OUTPUT_FILE=$(mktemp "$TMPBASE/revdiff-output-XXXXXX")
-trap 'rm -f "$OUTPUT_FILE"' EXIT
+ERR_FILE=$(mktemp "$TMPBASE/revdiff-err-XXXXXX")
+trap 'rm -f "$OUTPUT_FILE" "$ERR_FILE"' EXIT
 
 # shell-quote a single argument for safe embedding in sh -c strings.
 sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
@@ -33,6 +34,10 @@ REVDIFF_CMD="REVDIFF_EXIT_CODE_ON_ANNOTATIONS=true $REVDIFF_CMD $(sq "--output=$
 for arg in "$@"; do
     REVDIFF_CMD="$REVDIFF_CMD $(sq "$arg")"
 done
+# the overlay closes the moment a fast-failing revdiff exits, taking the error
+# text with it. every backend runs this command string, so one redirect here
+# captures stderr for all of them; print_output_and_exit replays it on failure
+REVDIFF_CMD="$REVDIFF_CMD 2>$(sq "$ERR_FILE")"
 
 write_rc_cmd() {
     local sentinel="$1"
@@ -55,6 +60,12 @@ read_rc() {
 
 print_output_and_exit() {
     local rc="${1:-0}"
+    # 0 is a clean quit and 10 means annotations were captured; both are
+    # successes, and revdiff writes ordinary warnings to stderr, so relaying
+    # them would put noise on every successful review
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 10 ] && [ -s "$ERR_FILE" ]; then
+        cat "$ERR_FILE" >&2
+    fi
     cat "$OUTPUT_FILE"
     exit "$rc"
 }
@@ -109,6 +120,31 @@ OVERLAY_TITLE="rd: ${DIR_NAME}${TITLE_REF:+ [$TITLE_REF]}"
 POPUP_W="${REVDIFF_POPUP_WIDTH:-90%}"
 POPUP_H="${REVDIFF_POPUP_HEIGHT:-90%}"
 
+# whether this agtermctl accepts `--pane` on overlay open. It reached the CLI after agterm v0.9.0, and
+# on an older one it is a usage error that --block would surface as a nonzero exit inside revdiff's own
+# 0/10 vocabulary, so ask the CLI rather than assume. The answer is the PATH agtermctl's, which is not
+# always the CLI belonging to the running app; the refusal fallback below is what covers that skew.
+agterm_supports_pane_overlay() {
+    agtermctl session overlay open --help 2>/dev/null | grep -q -- '--pane'
+}
+
+# 1 when the calling session carries a split, 0 otherwise. Window-scoped because `tree` defaults to the
+# FRONTMOST window, which is not the agent's whenever the user is looking elsewhere — unscoped it would
+# find no session and report every split as absent. jq is what parses it; without jq there is no honest
+# read, so it reports "not split" and the session-wide overlay stands.
+agterm_session_split() {
+    local tree args=(tree --json)
+    command -v jq >/dev/null 2>&1 || { printf '0'; return 0; }
+    [ -n "${AGTERM_WINDOW_ID:-}" ] && args+=(--window "$AGTERM_WINDOW_ID")
+    [ -n "${AGTERM_SOCKET:-}" ] && args+=(--socket "$AGTERM_SOCKET")
+    tree=$(agtermctl "${args[@]}" 2>/dev/null) || tree=""
+    [ -n "$tree" ] || { printf '0'; return 0; }
+    printf '%s' "$tree" | jq -r --arg s "$AGTERM_SESSION_ID" '
+        [.result.tree.workspaces[].sessions[] | select(.id == $s)][0].split // false
+        | if . then 1 else 0 end
+    ' 2>/dev/null || printf '0'
+}
+
 # agterm: `agtermctl session overlay open <cmd> --block` opens revdiff in a FULL-pane overlay (no
 # --size-percent) over the agent's own session and blocks until it exits, returning revdiff's exit
 # code directly — so, unlike the sentinel-polling backends below, no sentinel is needed. Checked
@@ -135,11 +171,54 @@ if [ -n "${AGTERM_SESSION_ID:-}" ] && command -v agtermctl >/dev/null 2>&1; then
     # the temp output file on every exit path, and INT/TERM exit through it, so an interrupt never
     # leaves the indicator stuck or the file behind (this trap supersedes the earlier output-file one).
     agtermctl "${AGTERM_STATUS[@]}" "${AGTERM_TARGET[@]}" >/dev/null 2>&1 || true
-    trap 'agtermctl session status active "${AGTERM_TARGET[@]}" >/dev/null 2>&1 || true; rm -f "$OUTPUT_FILE"' EXIT
+    trap 'agtermctl session status active "${AGTERM_TARGET[@]}" >/dev/null 2>&1 || true; rm -f "$OUTPUT_FILE" "$ERR_FILE"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
+
+    # optional pane-scoped overlay (REVDIFF_AGTERM_PANE=1). The overlay above covers the WHOLE session,
+    # so in a visible split the review hides the sibling pane's work; `--pane` scopes it to the agent's
+    # own pane and leaves the sibling live and visible. Opt-in because that also gives the review half
+    # the width, which is the wrong trade for a wide diff — unset leaves the call as it was. Only the
+    # split panes qualify: `scratch` is a full-coverage surface with no sibling to spare.
+    # Known limitation: $AGTERM_PANE is baked into the shell's environ at spawn, so a pane promoted into
+    # the main slot keeps `right`. Promote-then-re-split therefore scopes the overlay to the new sibling
+    # rather than this pane, and agterm reports no error because that pane does exist — the fallback
+    # below cannot see it. `session status` takes a stable `--pane-id` token for exactly this; `overlay
+    # open` does not yet, and the control tree exposes nothing to resolve one against, so there is no
+    # launcher-side fix. Failing closed to the session-wide overlay is deliberately NOT the answer: that
+    # drops the feature for everyone to avoid a rare misplaced surface the user can see and close.
+    AGTERM_OPEN=(session overlay open "$REVDIFF_CMD" "${AGTERM_TARGET[@]}" --cwd "$CWD")
+    AGTERM_PANE_SCOPED=0
+    if [ "${REVDIFF_AGTERM_PANE:-}" = 1 ]; then
+        case "${AGTERM_PANE:-}" in
+            left|right)
+                if agterm_supports_pane_overlay && [ "$(agterm_session_split)" = 1 ]; then
+                    AGTERM_OPEN+=(--pane "$AGTERM_PANE")
+                    AGTERM_PANE_SCOPED=1
+                fi
+                ;;
+        esac
+    fi
+
     rc=0
-    agtermctl session overlay open "$REVDIFF_CMD" "${AGTERM_TARGET[@]}" --cwd "$CWD" --block || rc=$?
+    # agtermctl's own stderr, captured apart from revdiff's (which the command string sends to
+    # $ERR_FILE) so the pane refusal below is decidable; replayed either way so nothing is swallowed.
+    # Its stdout is dropped because print_output_and_exit owns this launcher's stdout, which carries
+    # the annotations alone.
+    AGTERM_ERR=$(agtermctl "${AGTERM_OPEN[@]}" --block 2>&1 >/dev/null) || rc=$?
+    [ -n "$AGTERM_ERR" ] && printf '%s\n' "$AGTERM_ERR" >&2
+    # A pane open agterm refused means revdiff never ran, so the session-wide overlay every version
+    # supports is still worth trying rather than failing the review over geometry. Both refusals are
+    # post-checks and neither is decidable from the split read above: the split can go away between that
+    # read and this call, and a pane's overlay slot is separate from the session-wide one, so a stale
+    # pane overlay is invisible to it. Gated on agterm's own message so a revdiff failure is never
+    # retried — that would run the whole review a second time.
+    if [ "$rc" -ne 0 ] && [ "$AGTERM_PANE_SCOPED" -eq 1 ] &&
+        printf '%s' "$AGTERM_ERR" | grep -qE 'pane overlay already open|pane not visible'; then
+        rc=0
+        agtermctl session overlay open "$REVDIFF_CMD" "${AGTERM_TARGET[@]}" --cwd "$CWD" --block \
+            >/dev/null || rc=$?
+    fi
     print_output_and_exit "$rc"
 fi
 
@@ -174,7 +253,7 @@ if [ -n "${ZELLIJ:-}" ] && command -v zellij >/dev/null 2>&1; then
     rm -f "$SENTINEL"
 
     LAUNCH_SCRIPT=$(mktemp "$TMPBASE/revdiff-launch-XXXXXX")
-    trap 'rm -f "$OUTPUT_FILE" "$SENTINEL" "$SENTINEL.tmp" "$LAUNCH_SCRIPT"' EXIT
+    trap 'rm -f "$OUTPUT_FILE" "$ERR_FILE" "$SENTINEL" "$SENTINEL.tmp" "$LAUNCH_SCRIPT"' EXIT
     cat > "$LAUNCH_SCRIPT" <<LAUNCHER
 #!/bin/sh
 $(write_rc_cmd "$SENTINEL")
@@ -217,7 +296,7 @@ if [ "${HERDR_ENV:-}" = "1" ] && command -v herdr >/dev/null 2>&1; then
     rm -f "$SENTINEL"
 
     LAUNCH_SCRIPT=$(mktemp "$TMPBASE/revdiff-launch-XXXXXX")
-    trap 'rm -f "$OUTPUT_FILE" "$SENTINEL" "$SENTINEL.tmp" "$LAUNCH_SCRIPT"' EXIT
+    trap 'rm -f "$OUTPUT_FILE" "$ERR_FILE" "$SENTINEL" "$SENTINEL.tmp" "$LAUNCH_SCRIPT"' EXIT
     cat > "$LAUNCH_SCRIPT" <<LAUNCHER
 #!/bin/sh
 $(write_rc_cmd "$SENTINEL")
@@ -283,7 +362,7 @@ KITTY_SOCK="${KITTY_LISTEN_ON:-}"
 if [ -n "$KITTY_SOCK" ] && command -v kitty >/dev/null 2>&1; then
     SENTINEL=$(mktemp "$TMPBASE/revdiff-done-XXXXXX")
     rm -f "$SENTINEL"
-    trap 'rm -f "$OUTPUT_FILE" "$SENTINEL" "$SENTINEL.tmp"' EXIT
+    trap 'rm -f "$OUTPUT_FILE" "$ERR_FILE" "$SENTINEL" "$SENTINEL.tmp"' EXIT
 
     KITTY_ARGS=(kitty @ --to "$KITTY_SOCK" launch --type=overlay --title="$OVERLAY_TITLE" --cwd=current)
     if [ -n "${KITTY_WINDOW_ID:-}" ]; then
@@ -316,7 +395,7 @@ if [ -n "${WEZTERM_PANE:-}" ]; then
 
         WEZTERM_PCT="${REVDIFF_POPUP_HEIGHT:-90%}"
         WEZTERM_PCT="${WEZTERM_PCT%%%}"
-        trap 'rm -f "$OUTPUT_FILE" "$SENTINEL" "$SENTINEL.tmp"' EXIT
+        trap 'rm -f "$OUTPUT_FILE" "$ERR_FILE" "$SENTINEL" "$SENTINEL.tmp"' EXIT
         "${WEZTERM_CLI[@]}" split-pane --bottom --percent "$WEZTERM_PCT" \
             --pane-id "$WEZTERM_PANE" --cwd "$CWD" -- sh -c "$(write_rc_cmd "$SENTINEL")" >/dev/null 2>&1
 
@@ -339,7 +418,7 @@ if is_cmux_session; then
     rm -f "$SENTINEL"
 
     LAUNCH_SCRIPT=$(mktemp "$TMPBASE/revdiff-launch-XXXXXX")
-    trap 'rm -f "$OUTPUT_FILE" "$SENTINEL" "$SENTINEL.tmp" "$LAUNCH_SCRIPT"' EXIT
+    trap 'rm -f "$OUTPUT_FILE" "$ERR_FILE" "$SENTINEL" "$SENTINEL.tmp" "$LAUNCH_SCRIPT"' EXIT
     cat > "$LAUNCH_SCRIPT" <<LAUNCHER
 #!/bin/sh
 $(write_rc_cmd "$SENTINEL")
@@ -380,7 +459,7 @@ if [ "${TERM_PROGRAM:-}" = "ghostty" ] && command -v osascript >/dev/null 2>&1; 
     rm -f "$SENTINEL"
 
     LAUNCH_SCRIPT=$(mktemp "$TMPBASE/revdiff-launch-XXXXXX")
-    trap 'rm -f "$OUTPUT_FILE" "$SENTINEL" "$SENTINEL.tmp" "$LAUNCH_SCRIPT"' EXIT
+    trap 'rm -f "$OUTPUT_FILE" "$ERR_FILE" "$SENTINEL" "$SENTINEL.tmp" "$LAUNCH_SCRIPT"' EXIT
     cat > "$LAUNCH_SCRIPT" <<LAUNCHER
 #!/bin/sh
 $(write_rc_cmd "$SENTINEL")
@@ -429,7 +508,7 @@ if [ -n "${ITERM_SESSION_ID:-}" ] && command -v osascript >/dev/null 2>&1; then
 
     # use launcher script to avoid single-quote injection in paths
     LAUNCH_SCRIPT=$(mktemp "$TMPBASE/revdiff-launch-XXXXXX")
-    trap 'rm -f "$OUTPUT_FILE" "$SENTINEL" "$SENTINEL.tmp" "$LAUNCH_SCRIPT"' EXIT
+    trap 'rm -f "$OUTPUT_FILE" "$ERR_FILE" "$SENTINEL" "$SENTINEL.tmp" "$LAUNCH_SCRIPT"' EXIT
     cat > "$LAUNCH_SCRIPT" <<LAUNCHER
 #!/bin/sh
 cd "\$1" && $REVDIFF_CMD; rc=\$?; printf "%s" "\$rc" > "\$2.tmp" && mv -f "\$2.tmp" "\$2"
@@ -440,12 +519,13 @@ LAUNCHER
     ITERM_UUID="${ITERM_SESSION_ID##*:}"
 
     # find target session by UUID, auto-detect split direction, capture new session id
-    ITERM_NEW_SESSION=$(osascript - "$ITERM_UUID" "$LAUNCH_SCRIPT" "$CWD" "$SENTINEL" <<'APPLESCRIPT' 2>&1
+    ITERM_NEW_SESSION=$(osascript - "$ITERM_UUID" "$LAUNCH_SCRIPT" "$CWD" "$SENTINEL" "$OVERLAY_TITLE" <<'APPLESCRIPT' 2>&1
 on run argv
     set targetId to item 1 of argv
     set launchScript to item 2 of argv
     set cwd to item 3 of argv
     set sentinel to item 4 of argv
+    set overlayTitle to item 5 of argv
     set cmd to quoted form of launchScript & " " & quoted form of cwd & " " & quoted form of sentinel
     tell application id "com.googlecode.iterm2"
         repeat with w in windows
@@ -461,6 +541,16 @@ on run argv
                                 set newSession to split horizontally with same profile command cmd
                             end if
                         end tell
+                        -- the tab label comes from the name of its active
+                        -- session, and the split gets none of its own: it
+                        -- copies the parent profile but not the session
+                        -- variables that the profile name may interpolate.
+                        -- keep this comment free of apostrophes: bash 3.2
+                        -- scans the enclosing command substitution for quotes
+                        -- before it processes the heredoc, so an odd count
+                        -- here opens a quote that never closes and the whole
+                        -- script fails to parse
+                        set name of newSession to overlayTitle
                         return id of newSession
                     end if
                 end repeat
@@ -510,7 +600,7 @@ if [ "${INSIDE_EMACS:-}" = "vterm" ] && command -v emacsclient >/dev/null 2>&1; 
     # use launcher script to avoid shell interpolation issues in elisp strings;
     # embed all paths directly so vterm-shell needs no arguments
     LAUNCH_SCRIPT=$(mktemp "$TMPBASE/revdiff-launch-XXXXXX")
-    trap 'rm -f "$OUTPUT_FILE" "$SENTINEL" "$LAUNCH_SCRIPT"' EXIT
+    trap 'rm -f "$OUTPUT_FILE" "$ERR_FILE" "$SENTINEL" "$LAUNCH_SCRIPT"' EXIT
     cat > "$LAUNCH_SCRIPT" <<LAUNCHER
 #!/bin/sh
 cd $(sq "$CWD") && $(write_fifo_rc_cmd "$SENTINEL")

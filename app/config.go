@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/jessevdk/go-flags"
+
+	"github.com/umputun/revdiff/app/ui"
 )
 
 type options struct {
@@ -20,18 +22,22 @@ type options struct {
 	Staged                bool     `long:"staged" ini-name:"staged" env:"REVDIFF_STAGED" description:"show staged changes"`
 	Untracked             bool     `long:"untracked" ini-name:"untracked" env:"REVDIFF_UNTRACKED" description:"show untracked files in the tree"`
 	TreeWidth             int      `long:"tree-width" ini-name:"tree-width" env:"REVDIFF_TREE_WIDTH" default:"2" description:"file tree panel width in units (1-10, default 2 of 10)"`
+	TreePosition          string   `long:"tree-position" ini-name:"tree-position" env:"REVDIFF_TREE_POSITION" choice:"left" choice:"right" default:"left" description:"file tree and markdown TOC position"`
 	TabWidth              int      `long:"tab-width" ini-name:"tab-width" env:"REVDIFF_TAB_WIDTH" default:"4" description:"number of spaces per tab character"`
 	NoColors              bool     `long:"no-colors" ini-name:"no-colors" env:"REVDIFF_NO_COLORS" description:"disable all colors including syntax highlighting"`
 	NoStatusBar           bool     `long:"no-status-bar" ini-name:"no-status-bar" env:"REVDIFF_NO_STATUS_BAR" description:"hide the status bar"`
 	NoConfirmDiscard      bool     `long:"no-confirm-discard" ini-name:"no-confirm-discard" env:"REVDIFF_NO_CONFIRM_DISCARD" description:"skip confirmation prompt when discarding annotations with Q"`
 	NoConfirmReload       bool     `long:"no-confirm-reload" ini-name:"no-confirm-reload" env:"REVDIFF_NO_CONFIRM_RELOAD" description:"skip confirmation prompt when dropping annotations on reload with R"`
 	NoMouse               bool     `long:"no-mouse" ini-name:"no-mouse" env:"REVDIFF_NO_MOUSE" description:"disable mouse support (scroll wheel, click)"`
+	NoTree                bool     `long:"no-tree" ini-name:"no-tree" env:"REVDIFF_NO_TREE" description:"hide the file tree pane"`
 	Wrap                  bool     `long:"wrap" ini-name:"wrap" env:"REVDIFF_WRAP" description:"enable line wrapping in diff view"`
 	WrapIndent            int      `long:"wrap-indent" ini-name:"wrap-indent" env:"REVDIFF_WRAP_INDENT" default:"0" description:"indent wrap continuation rows by N columns so they hang under the first row's content (helps when reviewing markdown lists where unindented continuation can be misread as a new bullet)"`
+	PageOverlap           int      `long:"page-overlap" ini-name:"page-overlap" env:"REVDIFF_PAGE_OVERLAP" default:"0" description:"keep N lines from the previous screen when paging the diff"`
 	Collapsed             bool     `long:"collapsed" ini-name:"collapsed" env:"REVDIFF_COLLAPSED" description:"start in collapsed diff mode"`
 	Compact               bool     `long:"compact" ini-name:"compact" env:"REVDIFF_COMPACT" description:"start in compact diff mode (small context around changes)"`
 	CompactContext        int      `long:"compact-context" ini-name:"compact-context" env:"REVDIFF_COMPACT_CONTEXT" default:"5" description:"number of context lines around changes when in compact mode"`
 	CrossFileHunks        bool     `long:"cross-file-hunks" ini-name:"cross-file-hunks" env:"REVDIFF_CROSS_FILE_HUNKS" description:"allow [ and ] to jump across file boundaries"`
+	StartAtChange         bool     `long:"start-at-change" ini-name:"start-at-change" env:"REVDIFF_START_AT_CHANGE" description:"position the cursor on the first changed line"`
 	LineNumbers           bool     `long:"line-numbers" ini-name:"line-numbers" env:"REVDIFF_LINE_NUMBERS" description:"show line numbers in diff gutter"`
 	Blame                 bool     `long:"blame" ini-name:"blame" env:"REVDIFF_BLAME" description:"show blame gutter"`
 	WordDiff              bool     `long:"word-diff" ini-name:"word-diff" env:"REVDIFF_WORD_DIFF" description:"highlight intra-line word-level changes in paired add/remove lines"`
@@ -52,6 +58,7 @@ type options struct {
 	Only                  []string `long:"only" short:"F" no-ini:"true" description:"show only these files (may be repeated)"`
 	HistoryDir            string   `long:"history-dir" ini-name:"history-dir" env:"REVDIFF_HISTORY_DIR" description:"directory for review history auto-saves"`
 	Output                string   `long:"output" short:"o" env:"REVDIFF_OUTPUT" no-ini:"true" description:"write annotations to file instead of stdout"`
+	PostFlushCommand      string   `long:"post-flush-command" ini-name:"post-flush-command" env:"REVDIFF_POST_FLUSH_COMMAND" description:"run command after a successful O flush (requires -o/--output)"`
 	Keys                  string   `long:"keys" env:"REVDIFF_KEYS" no-ini:"true" description:"path to keybindings file"`
 	DumpKeys              bool     `long:"dump-keys" no-ini:"true" description:"print effective keybindings to stdout and exit"`
 	Theme                 string   `long:"theme" ini-name:"theme" env:"REVDIFF_THEME" description:"load theme from themes directory"`
@@ -118,6 +125,14 @@ func (o options) startupUntracked() bool {
 	return true
 }
 
+// treePosition resolves the --tree-position flag value to its typed position.
+func (o options) treePosition() ui.TreePosition {
+	if o.TreePosition == "right" {
+		return ui.TreePositionRight
+	}
+	return ui.TreePositionLeft
+}
+
 // parseArgs parses CLI arguments with config file support.
 // config file is loaded first, then CLI args override.
 // precedence: CLI flags > env vars > config file > built-in defaults.
@@ -168,6 +183,7 @@ func parseArgs(args []string) (options, error) {
 	if opts.Description != "" && opts.DescriptionFile != "" {
 		return options{}, errors.New("--description and --description-file are mutually exclusive")
 	}
+	opts.PostFlushCommand = strings.TrimSpace(opts.PostFlushCommand)
 
 	if err := validateStdinFlags(opts); err != nil {
 		return options{}, err
@@ -204,8 +220,7 @@ func loadConfigFile(iniParser *flags.IniParser, configPath string) {
 	if err == nil || errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) {
+	if _, ok := errors.AsType[*os.PathError](err); ok {
 		return // file access error (permission denied, etc.)
 	}
 	fmt.Fprintf(os.Stderr, "warning: config %s: %v\n", configPath, err)

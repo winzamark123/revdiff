@@ -15,6 +15,7 @@ package ui
 
 import (
 	"fmt"
+	"os/exec"
 	"reflect"
 	"strconv"
 	"strings"
@@ -102,6 +103,7 @@ type overlayManager interface {
 	OpenHelp(spec overlay.HelpSpec)
 	OpenAnnotList(spec overlay.AnnotListSpec)
 	OpenThemeSelect(spec overlay.ThemeSelectSpec)
+	OpenFilePicker(spec overlay.FilePickerSpec)
 	OpenInfo(spec overlay.InfoSpec)
 	UpdateInfo(spec overlay.InfoSpec)
 	Close()
@@ -117,6 +119,11 @@ type overlayManager interface {
 // that hides the underlying VCS). Defined on the consumer side per Go convention.
 type commitLogSource interface {
 	CommitLog(ref string) ([]diff.CommitInfo, error)
+}
+
+// PostFlushHook prepares the external command run after an in-session output flush.
+type PostFlushHook interface {
+	Prepare(content string) *exec.Cmd
 }
 
 // ThemeCatalog is what Model needs for theme discovery and persistence.
@@ -190,6 +197,8 @@ var (
 type FileTreeComponent interface {
 	// SelectedFile returns the full path of the currently selected file.
 	SelectedFile() string
+	// VisibleFiles returns visible file paths in rendered order, respecting filters.
+	VisibleFiles() []string
 	// TotalFiles returns the count of original file paths (before filtering).
 	TotalFiles() int
 	// FileStatus returns the git change status for the given file path.
@@ -269,6 +278,14 @@ type TOCComponent interface {
 	Render(r sidepane.TOCRender) string
 }
 
+// TreePosition is the side of the screen where the file tree or markdown TOC renders.
+type TreePosition int
+
+const (
+	TreePositionLeft TreePosition = iota
+	TreePositionRight
+)
+
 // pane identifies which pane has focus.
 type pane int
 
@@ -289,6 +306,7 @@ type loadedFileState struct {
 	lines            []diff.DiffLine        // parsed diff lines
 	highlighted      []string               // pre-computed highlighted content, parallel to lines
 	intraRanges      [][]worddiff.Range     // per-line intra-line word-diff ranges, parallel to lines
+	lineWidths       []int                  // per-line rendered display width, parallel to lines
 	adds             int                    // cached count of added lines
 	removes          int                    // cached count of removed lines
 	blameData        map[int]diff.BlameLine // blame info keyed by 1-based new line number
@@ -296,6 +314,9 @@ type loadedFileState struct {
 	lineNumWidth     int                    // digit width for line number columns
 	singleColLineNum bool                   // true for full-context files: one line-number column
 	loadSeq          uint64                 // monotonic counter to identify the latest load request
+	requestedPath    string                 // path of the outstanding request, empty after it completes
+	canceledLoadSeq  uint64                 // same-sequence request canceled by returning to the displayed file
+	canceledLoadPath string                 // path rejected for canceledLoadSeq
 	mdTOC            TOCComponent           // markdown table-of-contents (nil when not applicable)
 	singleFile       bool                   // true when diff contains exactly one file
 }
@@ -314,12 +335,15 @@ type modelConfigState struct {
 	noConfirmDiscard   bool               // skip confirmation prompt on discard quit
 	noConfirmReload    bool               // skip confirmation prompt on reload (R)
 	crossFileHunks     bool               // allow [ and ] to jump across file boundaries
+	startAtChange      bool               // put the cursor on the first changed line when a file loads
 	treeWidthRatio     int                // 1-10 units for file tree panel
 	tabSpaces          string             // spaces to replace tabs with
 	wrapIndent         int                // extra indent (in columns) for wrap continuation rows; 0 disables
 	annotPrefix        string             // cached: marker + " "
 	annotFilePrefix    string             // cached: marker + " file: "
 	outputPath         string             // --output destination for the O in-session flush; empty disables it
+
+	treePosition TreePosition // side the file tree or markdown TOC renders on
 }
 
 // layoutState holds viewport and layout concerns that change on resize and pane toggles.
@@ -344,6 +368,7 @@ type modeState struct {
 	showUntracked  bool           // true when untracked files are shown in tree
 	compact        bool           // true when diffs are fetched with small context around changes
 	compactContext int            // number of context lines around changes when compact is enabled
+	pageOverlap    int            // rows carried over from the previous screen on page up/down; 0 disables
 	vimMotion      bool           // true when the --vim-motion preset is active (gates the vim-motion interceptor in handleKey)
 }
 
@@ -546,18 +571,19 @@ type annotationState struct {
 // Model is the top-level bubbletea model for revdiff.
 type Model struct {
 	// injected dependencies
-	resolver     styleResolver
-	renderer     styleRenderer
-	sgr          sgrProcessor
-	differ       wordDiffer
-	overlay      overlayManager
-	tree         FileTreeComponent // never nil after NewModel; starts empty, gets Rebuilt on filesLoadedMsg
-	parseTOC     func(lines []diff.DiffLine, filename string) TOCComponent
-	store        *annotation.Store
-	diffRenderer Renderer
-	keymap       *keymap.Keymap
-	themes       ThemeCatalog   // theme catalog for discovery, resolve, and persistence
-	editor       ExternalEditor // launches $EDITOR for annotation editing and source-file opening
+	resolver      styleResolver
+	renderer      styleRenderer
+	sgr           sgrProcessor
+	differ        wordDiffer
+	overlay       overlayManager
+	tree          FileTreeComponent // never nil after NewModel; starts empty, gets Rebuilt on filesLoadedMsg
+	parseTOC      func(lines []diff.DiffLine, filename string) TOCComponent
+	store         *annotation.Store
+	diffRenderer  Renderer
+	keymap        *keymap.Keymap
+	themes        ThemeCatalog   // theme catalog for discovery, resolve, and persistence
+	editor        ExternalEditor // launches $EDITOR for annotation editing and source-file opening
+	postFlushHook PostFlushHook  // optional command run after an in-session output flush
 
 	// grouped state
 	cfg    modelConfigState // immutable session config
@@ -588,6 +614,12 @@ type Model struct {
 	loadUntracked        func() ([]string, error)                 // fetches untracked files; nil when unavailable
 	loadUntrackedRenames func([]string) ([]diff.FileEntry, error) // pairs untracked renames against their deleted origin; nil for non-git
 	blameNow             time.Time                                // snapshot of time.Now() set once per render pass for blame age
+
+	// renderCache memoizes per-line rendered blocks for renderDiff. Held behind a
+	// pointer because renderDiff has a value receiver: every Model copy shares one
+	// instance, which is what lets a block rendered by one copy serve the next.
+	// NewModel initializes this; direct Model{} construction is unsupported.
+	renderCache *diffRenderCache
 
 	discarded        bool // true when user chose to discard annotations and quit
 	inConfirmDiscard bool // true when showing discard confirmation prompt
@@ -702,6 +734,7 @@ type ModelConfig struct {
 	LoadUntrackedRenames func([]string) ([]diff.FileEntry, error)
 	Keymap               *keymap.Keymap // custom key bindings (nil uses defaults)
 	Editor               ExternalEditor // external-editor driver (nil uses app/editor.Editor{})
+	PostFlushHook        PostFlushHook  // optional command run after an in-session output flush
 	// CommitLog enumerates commits in the current ref range for the info popup's
 	// commit-log section. When nil, NewModel attempts to derive the source by
 	// type-asserting the Renderer against diff.CommitLogger; if the assertion
@@ -718,12 +751,15 @@ type ModelConfig struct {
 	NoColors         bool     // disable all colors including syntax highlighting
 	MouseTracking    bool     // enable mouse tracking for clicks and wheel events
 	NoStatusBar      bool     // hide the status bar
+	NoTree           bool     // hide the file tree pane
 	NoConfirmDiscard bool     // skip confirmation prompt when discarding annotations
 	NoConfirmReload  bool     // skip confirmation prompt when dropping annotations on reload
 	Wrap             bool     // enable line wrapping
 	WrapIndent       int      // extra indent (cols) for wrap continuation rows; 0 disables
+	PageOverlap      int      // rows carried over from the previous screen on page up/down; 0 disables
 	Collapsed        bool     // start in collapsed diff mode
 	CrossFileHunks   bool     // allow [ and ] to jump across file boundaries
+	StartAtChange    bool     // put the cursor on the first changed line when a file loads
 	LineNumbers      bool     // show line numbers in diff gutter
 	ShowBlame        bool     // show blame gutter; requires Blamer
 	ShowUntracked    bool     // show untracked files in the tree; requires LoadUntracked
@@ -774,6 +810,8 @@ type ModelConfig struct {
 	// disables the flush (there is no file to write to); a non-empty path enables
 	// it. Copied into modelConfigState.outputPath as a plain value.
 	OutputPath string
+
+	TreePosition TreePosition // side the file tree or markdown TOC renders on
 }
 
 // NewModel creates a new Model from the given configuration. All dependencies
@@ -837,24 +875,37 @@ func NewModel(cfg ModelConfig) (Model, error) {
 	if ed == nil || isNilValue(ed) {
 		ed = editor.Editor{}
 	}
+	postFlushHook := cfg.PostFlushHook
+	if isNilValue(postFlushHook) {
+		postFlushHook = nil
+	}
 	cls := resolveCommitLogSource(cfg.CommitLog, cfg.Renderer)
 	reviewCfg := cloneReviewInfoConfig(cfg.ReviewInfo)
 
+	// starting with the tree hidden has to move focus to the diff, the same way
+	// toggleTreePane does when it hides the pane. Leaving focus on the tree would
+	// point the cursor keys at a pane that is not on screen.
+	startFocus := paneTree
+	if cfg.NoTree {
+		startFocus = paneDiff
+	}
+
 	return Model{
-		resolver:     cfg.StyleResolver,
-		renderer:     cfg.StyleRenderer,
-		sgr:          cfg.SGR,
-		differ:       cfg.WordDiffer,
-		overlay:      cfg.Overlay,
-		keymap:       km,
-		store:        cfg.Store,
-		diffRenderer: cfg.Renderer,
-		highlighter:  cfg.Highlighter,
-		blamer:       cfg.Blamer,
-		tree:         cfg.NewFileTree(nil), // empty tree for nil-safety before first filesLoadedMsg
-		parseTOC:     cfg.ParseTOC,
-		themes:       cfg.Themes,
-		editor:       ed,
+		resolver:      cfg.StyleResolver,
+		renderer:      cfg.StyleRenderer,
+		sgr:           cfg.SGR,
+		differ:        cfg.WordDiffer,
+		overlay:       cfg.Overlay,
+		keymap:        km,
+		store:         cfg.Store,
+		diffRenderer:  cfg.Renderer,
+		highlighter:   cfg.Highlighter,
+		blamer:        cfg.Blamer,
+		tree:          cfg.NewFileTree(nil), // empty tree for nil-safety before first filesLoadedMsg
+		parseTOC:      cfg.ParseTOC,
+		themes:        cfg.Themes,
+		editor:        ed,
+		postFlushHook: postFlushHook,
 		cfg: modelConfigState{
 			ref:                cfg.Ref,
 			staged:             cfg.Staged,
@@ -867,7 +918,9 @@ func NewModel(cfg ModelConfig) (Model, error) {
 			noConfirmDiscard:   cfg.NoConfirmDiscard,
 			noConfirmReload:    cfg.NoConfirmReload,
 			crossFileHunks:     cfg.CrossFileHunks,
+			startAtChange:      cfg.StartAtChange,
 			treeWidthRatio:     cfg.TreeWidthRatio,
+			treePosition:       cfg.TreePosition,
 			tabSpaces:          strings.Repeat(" ", cfg.TabWidth),
 			wrapIndent:         max(0, cfg.WrapIndent),
 			annotPrefix:        cfg.AnnotationMarker + " ",
@@ -875,7 +928,8 @@ func NewModel(cfg ModelConfig) (Model, error) {
 			outputPath:         cfg.OutputPath,
 		},
 		layout: layoutState{
-			focus: paneTree,
+			focus:      startFocus,
+			treeHidden: cfg.NoTree,
 		},
 		modes: modeState{
 			wrap:           cfg.Wrap,
@@ -886,6 +940,7 @@ func NewModel(cfg ModelConfig) (Model, error) {
 			showUntracked:  cfg.ShowUntracked && cfg.LoadUntracked != nil,
 			compact:        cfg.Compact && cfg.CompactApplicable,
 			compactContext: cfg.CompactContext,
+			pageOverlap:    max(0, cfg.PageOverlap),
 			vimMotion:      cfg.VimMotion,
 		},
 		commits: commitsState{
@@ -900,6 +955,7 @@ func NewModel(cfg ModelConfig) (Model, error) {
 		reload:               reloadState{applicable: cfg.ReloadApplicable},
 		compact:              compactState{applicable: cfg.CompactApplicable},
 		annot:                annotationState{rowCache: make(map[annotCacheKey][]string)},
+		renderCache:          &diffRenderCache{},
 		loadUntracked:        cfg.LoadUntracked,
 		loadUntrackedRenames: cfg.LoadUntrackedRenames,
 		activeThemeName:      cfg.ActiveThemeName,
@@ -952,15 +1008,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleEditorFinished(msg)
 	case sourceEditorFinishedMsg:
 		return m.handleSourceEditorFinished(msg)
+	case postFlushFinishedMsg:
+		return m.handlePostFlushFinished(msg)
 	case wheelDebounceMsg:
 		return m.handleWheelDebounce(msg)
 	}
 
-	// forward other messages to textinput when annotating (e.g. cursor blink)
+	// forward other messages to textinput when annotating (e.g. paste completion).
+	// re-render only when the input text actually changed: renderDiff is O(diff lines)
+	// and repainting for a message that left the value untouched is pure waste.
 	if m.annot.annotating {
+		before := m.annot.input.Value()
 		var cmd tea.Cmd
 		m.annot.input, cmd = m.annot.input.Update(msg)
-		m.layout.viewport.SetContent(m.renderDiff()) // re-render so cursor blink updates are visible
+		if m.annot.input.Value() != before {
+			m.layout.viewport.SetContent(m.renderDiff())
+		}
 		return m, cmd
 	}
 
@@ -1036,11 +1099,29 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.dispatchAction(action)
 }
 
+// resolveDirectionalFocus maps spatial focus actions to semantic pane actions.
+// Explicit user bindings to focus_tree or focus_diff bypass this mapping.
+func (m Model) resolveDirectionalFocus(action keymap.Action) keymap.Action {
+	left, right := keymap.ActionFocusTree, keymap.ActionFocusDiff
+	if m.cfg.treePosition == TreePositionRight {
+		left, right = right, left
+	}
+	switch action {
+	case keymap.ActionFocusLeft:
+		return left
+	case keymap.ActionFocusRight:
+		return right
+	default:
+		return action
+	}
+}
+
 // dispatchAction routes a resolved keymap action through overlay-open, the
 // global action switch, and the pane-specific nav fallback. It is the unified
 // dispatch path shared by keymap-resolved single keys (handleKey) and by
 // chord-resolved actions (handleChordSecond).
 func (m Model) dispatchAction(action keymap.Action) (tea.Model, tea.Cmd) {
+	action = m.resolveDirectionalFocus(action)
 	if model, cmd, ok := m.handleOverlayOpen(action); ok {
 		return model, cmd
 	}
@@ -1109,6 +1190,10 @@ func (m Model) handleOverlayOpen(action keymap.Action) (tea.Model, tea.Cmd, bool
 	case keymap.ActionThemeSelect:
 		m.clearPendingInputState()
 		m.openThemeSelector()
+		return m, nil, true
+	case keymap.ActionJumpFile:
+		m.clearPendingInputState()
+		m.openFilePicker()
 		return m, nil, true
 	case keymap.ActionInfo:
 		m.clearPendingInputState()
@@ -1237,6 +1322,9 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
 			m.confirmThemeByName(out.ThemeChoice.Name)
 		case overlay.OutcomeThemeCanceled:
 			m.cancelThemeSelect()
+		case overlay.OutcomeFileChosen:
+			model, cmd := m.jumpToFile(out.FileChoice.Path)
+			return true, model, cmd
 		case overlay.OutcomeClosed, overlay.OutcomeNone:
 		}
 		return true, m, nil

@@ -2,15 +2,25 @@ package ui
 
 import (
 	"slices"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/umputun/revdiff/app/diff"
 	"github.com/umputun/revdiff/app/keymap"
 	"github.com/umputun/revdiff/app/ui/sidepane"
 )
 
-const scrollStep = 4 // horizontal scroll step in characters
+const (
+	scrollStep = 4 // horizontal scroll step in characters
+
+	// changePrefixWidth is the display width of the add/remove/context marker
+	// linePrefix re-adds at render time (" + ", " - ", "   "); dividerPrefixWidth
+	// is the single leading space renderDiffLine gives a divider row instead.
+	changePrefixWidth  = 3
+	dividerPrefixWidth = 1
+)
 
 // cursorDiffLine returns the DiffLine at the current cursor position, if valid.
 func (m Model) cursorDiffLine() (diff.DiffLine, bool) {
@@ -31,11 +41,14 @@ func (m *Model) moveDiffCursorDown() {
 // Callers that move the cursor repeatedly (e.g. repeatDiffAction for N j/k) call
 // findHunks once and pass the result in to avoid O(N × len(diff)) rescans.
 func (m *Model) moveDiffCursorDownWithHunks(hunks []int) {
-	// if currently on annotation sub-line, move to the next diff line
+	// if currently on annotation sub-line, move to the next diff line. the flag clears only once a
+	// next line is found: with no line left the cursor has nowhere to go, so staying on the
+	// annotation is what "no movement" means. clearing it unconditionally would walk the cursor
+	// back up onto the diff row and, in moveDiffCursorDownBy, read as progress forever.
 	if m.annot.cursorOnAnnotation {
-		m.annot.cursorOnAnnotation = false
 		for i := m.nav.diffCursor + 1; i < len(m.file.lines); i++ {
 			if m.file.lines[i].ChangeType != diff.ChangeDivider && !m.isCollapsedHidden(i, hunks) {
+				m.annot.cursorOnAnnotation = false
 				m.nav.diffCursor = i
 				return
 			}
@@ -79,7 +92,10 @@ func (m *Model) moveDiffCursorUp() {
 // moveDiffCursorUpWithHunks is the hunks-precomputed variant of moveDiffCursorUp.
 // See moveDiffCursorDownWithHunks for the rationale.
 func (m *Model) moveDiffCursorUpWithHunks(hunks []int) {
-	// if currently on annotation sub-line, move up to the diff line itself
+	// if currently on annotation sub-line, move up to the diff line itself. the sub-row renders below
+	// its diff line (rowOnAnnotationSubLine), so clearing the flag IS the upward move - unlike the
+	// downward walk, where clearing without advancing diffCursor is no movement at all and spins
+	// moveDiffCursorDownBy.
 	if m.annot.cursorOnAnnotation {
 		m.annot.cursorOnAnnotation = false
 		return
@@ -108,14 +124,25 @@ func (m *Model) moveDiffCursorUpWithHunks(hunks []int) {
 // keeps the cursor's relative screen position stable by scrolling both
 // cursor and viewport by the same amount.
 func (m *Model) moveDiffCursorPageDown() {
-	m.moveDiffCursorDownBy(m.layout.viewport.Height)
+	m.moveDiffCursorDownBy(m.pageRows())
 }
 
 // moveDiffCursorPageUp moves the diff cursor up by one visual page.
 // keeps the cursor's relative screen position stable by scrolling both
 // cursor and viewport by the same amount.
 func (m *Model) moveDiffCursorPageUp() {
-	m.moveDiffCursorUpBy(m.layout.viewport.Height)
+	m.moveDiffCursorUpBy(m.pageRows())
+}
+
+// pageRows returns how far a full-page motion advances, one screen less the
+// configured overlap. the overlap is approximate rather than exact, and deviates in both
+// directions: the walk stops on cursor positions and one position can span several rendered
+// rows (a wrapped line, an annotation block), so a tall line at the page edge carries over
+// more than requested when the walk rolls back off it, and less than requested - down to
+// rows skipped unseen - when worthRollingBack accepts it whole.
+// half-page motions do not subtract it - they already retain half a screen.
+func (m Model) pageRows() int {
+	return max(1, m.layout.viewport.Height-m.modes.pageOverlap)
 }
 
 // moveDiffCursorHalfPageDown moves the diff cursor down by half a visual page.
@@ -136,20 +163,37 @@ func (m *Model) moveDiffCursorHalfPageUp() {
 // accounts for divider lines, wrap continuations, and annotation rows that occupy rendered space.
 // transitions onto an annotation sub-row (cursorOnAnnotation flip with no diffCursor change)
 // count as real progress so the loop does not terminate early on annotated lines.
+// a step that would carry the delta past rows is undone, but only when what is already
+// walked is worth keeping (see worthRollingBack): one cursor step can span many rows
+// (a wrapped line or an annotation block), and scrolling by that whole height would move the
+// viewport further than a page, past rows it never rendered.
 func (m *Model) moveDiffCursorDownBy(rows int) {
-	startY := m.cursorViewportY()
+	hunks := m.findHunks()
+	offsets := m.cursorVisualOffsets(hunks, m.buildAnnotationSet())
+	startY := m.cursorViewportYFromOffsets(offsets)
+	walked := 0
 	for {
 		prevCursor := m.nav.diffCursor
 		prevAnnot := m.annot.cursorOnAnnotation
-		m.moveDiffCursorDown()
+		m.moveDiffCursorDownWithHunks(hunks)
 		if m.nav.diffCursor == prevCursor && m.annot.cursorOnAnnotation == prevAnnot {
 			break // no more movement possible (end of content)
 		}
-		if m.cursorViewportY()-startY >= rows {
+		delta := m.cursorViewportYFromOffsets(offsets) - startY
+		// walking down, the delta grows by the height of the line being LEFT, not the one
+		// arrived at: offsets[i] is that line's top row, so its own wrap and annotation rows
+		// are only counted once the cursor steps past them
+		if delta > rows && m.worthRollingBack(walked, rows) {
+			m.nav.diffCursor = prevCursor
+			m.annot.cursorOnAnnotation = prevAnnot
+			break
+		}
+		walked = delta
+		if delta >= rows {
 			break
 		}
 	}
-	actualDelta := m.cursorViewportY() - startY
+	actualDelta := m.cursorViewportYFromOffsets(offsets) - startY
 	maxOffset := max(0, m.layout.viewport.TotalLineCount()-m.layout.viewport.Height)
 	m.layout.viewport.SetYOffset(min(m.layout.viewport.YOffset+actualDelta, maxOffset))
 	m.layout.viewport.SetContent(m.renderDiff())
@@ -161,22 +205,48 @@ func (m *Model) moveDiffCursorDownBy(rows int) {
 // accounts for divider lines, wrap continuations, and annotation rows that occupy rendered space.
 // transitions off an annotation sub-row count as real progress so the loop does not
 // terminate early on annotated lines.
+// a step that would carry the delta past rows is undone on the same terms as the
+// downward walk: scrolling by a tall line's whole height skips rows that were never rendered.
 func (m *Model) moveDiffCursorUpBy(rows int) {
-	startY := m.cursorViewportY()
+	hunks := m.findHunks()
+	offsets := m.cursorVisualOffsets(hunks, m.buildAnnotationSet())
+	startY := m.cursorViewportYFromOffsets(offsets)
+	walked := 0
 	for {
 		prevCursor := m.nav.diffCursor
 		prevAnnot := m.annot.cursorOnAnnotation
-		m.moveDiffCursorUp()
+		m.moveDiffCursorUpWithHunks(hunks)
 		if m.nav.diffCursor == prevCursor && m.annot.cursorOnAnnotation == prevAnnot {
 			break // no more movement possible (start of content)
 		}
-		if startY-m.cursorViewportY() >= rows {
+		delta := startY - m.cursorViewportYFromOffsets(offsets)
+		// walking up, the delta grows by the height of the line ARRIVED at, including the
+		// annotation block that renders below it - the mirror of the downward walk
+		if delta > rows && m.worthRollingBack(walked, rows) {
+			m.nav.diffCursor = prevCursor
+			m.annot.cursorOnAnnotation = prevAnnot
+			break
+		}
+		walked = delta
+		if delta >= rows {
 			break
 		}
 	}
-	actualDelta := startY - m.cursorViewportY()
+	actualDelta := startY - m.cursorViewportYFromOffsets(offsets)
 	m.layout.viewport.SetYOffset(max(0, m.layout.viewport.YOffset-actualDelta))
 	m.layout.viewport.SetContent(m.renderDiff())
+}
+
+// worthRollingBack reports whether undoing an overshooting step leaves a useful scroll.
+// a rollback trades landing past the requested page for landing short of it, worthwhile only
+// when what is already walked is a real move. with a block taller than the page ahead of the
+// cursor there is no selectable position inside it, so rolling back to a row or two would
+// scroll the pane by almost nothing and the next press would take the same oversized step
+// anyway - worse than simply taking it now. half a page is the bar, matching ctrl+d/ctrl+u.
+// walked is 0 on the first step, so no rollback can fire there and the walk can never
+// refuse to move.
+func (m Model) worthRollingBack(walked, rows int) bool {
+	return walked*2 >= rows
 }
 
 // moveDiffCursorToStart moves the diff cursor to the first selectable position.
@@ -218,6 +288,10 @@ func (m *Model) moveDiffCursorToEnd() {
 // the clamp accept a larger target after content grows (e.g. a freshly saved
 // multi-row annotation extending past the prior content end).
 func (m *Model) syncViewportToCursor() {
+	// every layout change that widens the diff pane — resize, tree hide, line-number or
+	// blame toggle — lands here before rendering, and each lowers the horizontal bound
+	// without a horizontal keypress of its own.
+	m.clampHorizontalScroll()
 	cursorTop, cursorBottom := m.cursorVisualRange()
 	m.layout.viewport.SetContent(m.renderDiff())
 	switch {
@@ -586,6 +660,62 @@ func (m Model) handleHunkNav(forward bool) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// computeLineWidths returns the rendered display width of every diff line, parallel to
+// file.lines. it measures what applyHorizontalScroll actually cuts: the change prefix plus
+// the tab-expanded content, gutters excluded (those shrink the visible width instead).
+// measured on plain Content rather than the highlighted copy — chroma adds only ANSI, which
+// carries no display width and costs more to scan.
+func (m Model) computeLineWidths() []int {
+	widths := make([]int, len(m.file.lines))
+	for i, dl := range m.file.lines {
+		prefix := changePrefixWidth
+		if dl.ChangeType == diff.ChangeDivider {
+			prefix = dividerPrefixWidth
+		}
+		widths[i] = prefix + lipgloss.Width(strings.ReplaceAll(dl.Content, "\t", m.cfg.tabSpaces))
+	}
+	return widths
+}
+
+// maxHorizontalScroll returns the largest scrollX offset that still shows content, i.e. the
+// widest rendered row minus the columns the pane can display. 0 when everything fits.
+func (m Model) maxHorizontalScroll() int {
+	visible := m.diffContentWidth() - m.gutterExtra()
+	if visible <= 0 {
+		return 0
+	}
+	return max(0, m.maxRenderedContentWidth()-visible)
+}
+
+// ensureLineWidths repopulates the width cache when it has fallen out of step with file.lines.
+// lineWidths is pure derived data, so a miss must cost a scan and never correctness — a caller
+// that sets file.lines without recomputing would otherwise get a zero bound and no horizontal
+// scroll at all. length equality cannot catch a same-length replacement, so production still
+// owes the recompute in handleFileLoaded; this only keeps a miss from being silent.
+func (m *Model) ensureLineWidths() {
+	if len(m.file.lineWidths) != len(m.file.lines) {
+		m.file.lineWidths = m.computeLineWidths()
+	}
+}
+
+// setScrollX stores a horizontal offset bounded to the current rendered document. every
+// nonzero write to layout.scrollX must go through here: an unbounded offset past the widest
+// row makes applyHorizontalScroll cut past every line, blanking the pane with no « indicator
+// to explain it. the two direct `scrollX = 0` assignments (file load, wrap enable) are safe
+// as they are.
+func (m *Model) setScrollX(x int) {
+	m.ensureLineWidths()
+	m.layout.scrollX = min(max(0, x), m.maxHorizontalScroll())
+}
+
+// clampHorizontalScroll re-applies the bound to the stored offset. widening the visible area
+// — a terminal resize, hiding the tree, turning off line numbers or blame — lowers the
+// maximum without any horizontal keypress, so the paths that do those call this before they
+// render.
+func (m *Model) clampHorizontalScroll() {
+	m.setScrollX(m.layout.scrollX)
+}
+
 // handleHorizontalScroll processes left/right scroll keys.
 // direction < 0 scrolls left, direction > 0 scrolls right.
 // no-op when wrap mode is active (content is already fully visible).
@@ -594,9 +724,9 @@ func (m *Model) handleHorizontalScroll(direction int) {
 		return
 	}
 	if direction < 0 {
-		m.layout.scrollX = max(0, m.layout.scrollX-scrollStep)
+		m.setScrollX(m.layout.scrollX - scrollStep)
 	} else {
-		m.layout.scrollX += scrollStep
+		m.setScrollX(m.layout.scrollX + scrollStep)
 	}
 	m.layout.viewport.SetContent(m.renderDiff())
 }
@@ -841,17 +971,28 @@ func (m *Model) syncTOCActiveSection() {
 	}
 }
 
+// positionOnFirstChange puts the cursor on the first changed line, falling back to the first visible
+// line when the file carries no hunks at all (context-only sources). in collapsed mode it lands on
+// the delete-only placeholder rather than skipping the hunk, since that head line stays visible.
+//
+// this only positions the cursor: a caller loading a new file MUST follow it with
+// centerViewportOnCursor and must not drop that call as a duplicate render. moveToNextHunk scrolls
+// via centerHunkInViewport, which sets the offset before rendering, so the offset clamps against the
+// previously loaded file's length; on the no-hunk path nothing renders at all.
+func (m *Model) positionOnFirstChange() {
+	m.nav.diffCursor = -1
+	m.moveToNextHunk()
+	if m.nav.diffCursor == -1 {
+		m.skipInitialDividers()
+	}
+}
+
 // applyPendingHunkJump moves the cursor to the first or last hunk after a cross-file navigation.
 func (m *Model) applyPendingHunkJump() {
 	forward := *m.nav.pendingHunkJump
 	m.nav.pendingHunkJump = nil
 	if forward {
-		m.nav.diffCursor = -1
-		m.moveToNextHunk()
-		if m.nav.diffCursor != -1 {
-			return
-		}
-		m.skipInitialDividers()
+		m.positionOnFirstChange()
 		return
 	}
 

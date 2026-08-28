@@ -35,7 +35,7 @@ When a diff contains exactly one file, revdiff automatically hides the file tree
 
 ## Markdown TOC Navigation
 
-When reviewing a single markdown file in context-only mode (e.g., `revdiff --only=README.md`), a table-of-contents pane appears on the left listing all markdown headers with indentation by level. Use `Tab` to switch between TOC and diff, `j`/`k` to navigate headers, `n`/`p` to jump to next/prev header from either pane, `Enter` to jump to a header. The TOC highlights the current section as you scroll. Headers inside fenced code blocks are excluded.
+When reviewing a single markdown file in context-only mode (e.g., `revdiff --only=README.md`), a table-of-contents pane appears on the configured tree side (left by default) listing all markdown headers with indentation by level. Use `Tab` to switch between TOC and diff, `j`/`k` to navigate headers, `n`/`p` to jump to next/prev header from either pane, `Enter` to jump to a header. The TOC highlights the current section as you scroll. Headers inside fenced code blocks are excluded.
 
 ## All-Files Mode
 
@@ -121,8 +121,11 @@ Use `--stdin` to review arbitrary piped or redirected text as one synthetic file
 | `Home/End` | Jump to first/last item |
 | `Enter` | Switch to diff pane (tree) / start annotation (diff pane) |
 | `n/p` | Next/previous changed file; next/prev header in markdown TOC mode (n = next match when search active) |
+| `P` | Open the file picker |
 | `[` / `]` | Jump to previous/next change hunk in diff |
 | `e` | Open focused file in `$EDITOR` |
+
+The file picker lists paths currently visible in the sidebar, preserving annotated-only and unreviewed-only filters. Printable keys always filter full relative paths; use the arrow keys or mouse wheel to move, and press `Enter` or left-click to jump. `Backspace` edits the filter. The first `Esc` clears a non-empty filter and keeps the picker open; the second closes it. Because printable keys always filter, `P` typed inside the picker adds to the filter rather than closing it; a `jump_file` binding with a modifier (e.g. `map alt+f jump_file`) closes the picker when pressed again.
 
 **Search:**
 
@@ -206,9 +209,11 @@ revdiff enables mouse tracking by default so the scroll wheel and left-click wor
 - **Left-click in the tree** — focuses the tree and selects/loads the clicked entry. Clicking a directory row moves the cursor but does not load a file.
 - **Left-click in the diff** — focuses the diff and moves the cursor to the clicked line. Enables a "click, then `a`" annotation flow.
 - **Left-click in the TOC pane** (single-file markdown) — focuses the TOC and selects the clicked header.
-- **Scroll wheel in overlay popups** (info, annotations, themes) — scrolls the popup content or moves its cursor. Shift+wheel uses a half-page step. In the theme selector, wheel previews each theme live. Help overlay has no scrollable or selectable content so mouse events are ignored.
+- **Scroll wheel in overlay popups** (info, annotations, themes, help) — scrolls the popup content or moves its cursor. Shift+wheel uses a half-page step. In the theme selector, wheel previews each theme live.
 - **Left-click in the annotation popup** — jumps to the clicked annotation (same as pressing `Enter`).
 - **Left-click in the theme popup** — confirms the clicked theme (same as pressing `Enter`). Clicks on the filter row or blank separator are ignored.
+- **Left-click in the file picker** — jumps to the clicked file (same as pressing `Enter`). Clicks on the filter row or blank separator are ignored.
+- **Scroll wheel in the file picker** — moves the picker cursor. Shift+wheel uses a half-page step.
 
 Horizontal wheel, right-click, middle-click, drag selection, and clicks on the status bar or diff header are intentionally ignored. Clicks outside an open overlay are swallowed — dismiss an overlay with `Esc` or its toggle key. Modal states (annotation input, search input, confirm discard, reload confirm) swallow mouse events entirely.
 
@@ -216,6 +221,7 @@ Horizontal wheel, right-click, middle-click, drag selection, and clicks on the s
 
 - **kitty**: hold `Ctrl+Shift` while dragging
 - **iTerm2**: hold `Option` while dragging
+- **ghostty** (and ghostty-based terminals such as agterm): hold `Shift` while dragging. Ghostty also uses `Shift` to *extend* an existing selection, so if text is already selected the drag grows that selection instead of starting a new one - clear it first. Ghostty 1.3.0+ additionally has a `toggle_mouse_reporting` keybind, unbound by default, which suspends mouse capture without restarting revdiff
 - **most other terminals**: hold `Shift` while dragging
 
 Because the tree pane is rendered alongside the diff on the same rows, multi-line Shift+drag will include tree content. For clean copies of diff text, use your terminal's block-select mode (Option+drag in iTerm2, Ctrl+Shift+drag in kitty) or run with `--no-mouse` to disable mouse capture entirely.
@@ -299,6 +305,20 @@ Comment body lines starting with `## ` (the record-header form) are prefixed wit
 Use `--output` / `-o` flag to write annotations to a file instead of stdout.
 
 Exit status: `0` = no annotations, discarded annotations, or default mode; `10` = annotations were produced with `--exit-code-on-annotations`, `REVDIFF_EXIT_CODE_ON_ANNOTATIONS`, or `exit-code-on-annotations`; `1` = real errors. Agent launchers set `REVDIFF_EXIT_CODE_ON_ANNOTATIONS` and treat `10` as success-with-annotations.
+
+## Asking Questions Instead of Directives
+
+An annotation is normally an instruction to change code. To ask about the code instead, put `??` anywhere in the text, or open with `explain`, `remind`, `describe`, `what is`, `what are`, `how does`, `how do` or `clarify` (case-insensitive). `??` is the language-neutral form and works whatever language you write in.
+
+```
+## renderer.go:142 (+)
+why a pointer here??
+
+## store.go:88 (-)
+explain what this lock protects
+```
+
+The agent answers as a markdown document and reopens it in revdiff via `--only`, with a TOC sidebar. Annotate that document to ask follow-ups and it is refined and reopened; the loop ends when you quit without annotating. Code-change annotations from the same batch are held and applied after the explanation loop finishes. Applies to the Claude and Codex plugins; the Pi package classifies questions the same way but answers them in chat.
 
 ## Preloading Annotations
 

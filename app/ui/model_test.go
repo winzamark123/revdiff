@@ -3,6 +3,7 @@ package ui
 import (
 	"testing"
 
+	bubblecursor "github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -501,19 +502,43 @@ func TestModel_TreeNavigation(t *testing.T) {
 }
 
 func TestModel_FocusSwitching(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		treePos TreePosition
+		toDiff  rune // key that moves focus tree→diff
+		toTree  rune // key that moves focus diff→tree
+	}{
+		{name: "left tree", toDiff: 'l', toTree: 'h'},
+		{name: "right tree", treePos: TreePositionRight, toDiff: 'h', toTree: 'l'},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testModel([]string{"a.go"}, nil)
+			m.tree = testNewFileTree([]string{"a.go"})
+			m.cfg.treePosition = tc.treePos
+			m.file.name = "a.go" // pretend a file is loaded
+			m.layout.focus = paneTree
+
+			result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tc.toDiff}})
+			model := result.(Model)
+			assert.Equal(t, paneDiff, model.layout.focus)
+
+			result, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tc.toTree}})
+			model = result.(Model)
+			assert.Equal(t, paneTree, model.layout.focus)
+		})
+	}
+}
+
+func TestModel_FocusSwitching_UserSemanticBinding(t *testing.T) {
 	m := testModel([]string{"a.go"}, nil)
 	m.tree = testNewFileTree([]string{"a.go"})
-	m.file.name = "a.go" // pretend a file is loaded
-	m.layout.focus = paneTree
+	m.cfg.treePosition = TreePositionRight
+	m.keymap.Bind("h", keymap.ActionFocusTree)
+	m.file.name = "a.go"
+	m.layout.focus = paneDiff
 
-	// l switches to diff pane
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 	model := result.(Model)
-	assert.Equal(t, paneDiff, model.layout.focus)
-
-	// h switches back to tree
-	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
-	model = result.(Model)
 	assert.Equal(t, paneTree, model.layout.focus)
 }
 
@@ -1252,6 +1277,21 @@ func TestHandleOverlayOpen_ThemeSelectClearsChord(t *testing.T) {
 	assert.Equal(t, overlay.KindThemeSelect, model.overlay.Kind())
 }
 
+func TestHandleOverlayOpen_FilePickerClearsChord(t *testing.T) {
+	m := testModel([]string{"a.go"}, nil)
+	m.keys.chordPending = "ctrl+w"
+	m.keys.hint = "Pending: ctrl+w, esc to cancel"
+
+	result, _, handled := m.handleOverlayOpen(keymap.ActionJumpFile)
+	model := result.(Model)
+
+	assert.True(t, handled, "ActionJumpFile must be handled by handleOverlayOpen")
+	assert.Empty(t, model.keys.chordPending, "file-picker entry must clear chordPending")
+	assert.Empty(t, model.keys.hint, "file-picker entry must clear chord hint")
+	assert.True(t, model.overlay.Active(), "file picker must be open")
+	assert.Equal(t, overlay.KindFilePicker, model.overlay.Kind())
+}
+
 func TestHandleOverlayOpen_InfoClearsChord(t *testing.T) {
 	m := testModel([]string{"a.go"}, nil)
 	m.commits.source = &fakeCommitLog{}
@@ -1689,4 +1729,97 @@ func TestHandleKey_NonKeyMessagesPreserveChordState(t *testing.T) {
 			assert.Equal(t, "Pending: ctrl+w, esc to cancel", after.keys.hint, "chord hint must survive non-key messages")
 		})
 	}
+}
+
+func TestModel_AnnotatingNoOpMessageDoesNotRerenderDiff(t *testing.T) {
+	// pins the cost regression: every message forwarded to the annotation input used to
+	// force SetContent(renderDiff()), which is O(diff lines). the cursor blink alone fired
+	// it twice a second on an idle session.
+	lines := []diff.DiffLine{
+		{NewNum: 1, Content: "original one", ChangeType: diff.ChangeContext},
+		{NewNum: 2, Content: "original two", ChangeType: diff.ChangeContext},
+	}
+	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+	res, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = res.(Model)
+	res, _ = m.Update(fileLoadedMsg{file: "a.go", lines: lines})
+	m = res.(Model)
+	m.layout.focus = paneDiff
+	m.nav.diffCursor = 0
+	m.startAnnotation()
+	m.layout.viewport.SetContent(m.renderDiff())
+
+	// mutating line content in place is a test-only shortcut: production replaces the whole
+	// slice in handleFileLoaded, which bumps loadSeq and invalidates the caches itself. Do the
+	// invalidation by hand so the probe below measures the blink, not a stale cached block.
+	m.file.lines[1].Content = "sentinel-after-render"
+	m.invalidateRenderCaches()
+	require.Contains(t, m.renderDiff(), "sentinel-after-render", "a fresh render would pick the change up")
+
+	res, _ = m.Update(bubblecursor.BlinkMsg{})
+	m = res.(Model)
+	assert.NotContains(t, m.layout.viewport.View(), "sentinel-after-render",
+		"blink left the input value untouched, so the diff must not be re-rendered")
+}
+
+func TestNewModel_PageOverlap(t *testing.T) {
+	renderer := &mocks.RendererMock{
+		ChangedFilesFunc: func(string, bool) ([]diff.FileEntry, error) { return nil, nil },
+		FileDiffFunc:     func(diff.FileDiffRequest) ([]diff.DiffLine, error) { return nil, nil },
+	}
+	newModel := func(overlap int) Model {
+		return testNewModel(t, renderer, annotation.NewStore(), noopHighlighter(),
+			ModelConfig{PageOverlap: overlap, TreeWidthRatio: 3})
+	}
+
+	t.Run("default is no overlap", func(t *testing.T) {
+		assert.Equal(t, 0, newModel(0).modes.pageOverlap)
+	})
+
+	t.Run("configured value reaches mode state", func(t *testing.T) {
+		assert.Equal(t, 2, newModel(2).modes.pageOverlap)
+	})
+
+	t.Run("negative clamps to zero", func(t *testing.T) {
+		assert.Equal(t, 0, newModel(-5).modes.pageOverlap)
+	})
+}
+
+func TestNewModel_NoTree(t *testing.T) {
+	renderer := &mocks.RendererMock{
+		ChangedFilesFunc: func(string, bool) ([]diff.FileEntry, error) { return nil, nil },
+		FileDiffFunc:     func(diff.FileDiffRequest) ([]diff.DiffLine, error) { return nil, nil },
+	}
+	newModel := func(noTree bool) Model {
+		return testNewModel(t, renderer, annotation.NewStore(), noopHighlighter(),
+			ModelConfig{NoTree: noTree, TreeWidthRatio: 3})
+	}
+
+	t.Run("default keeps the tree visible and focused", func(t *testing.T) {
+		m := newModel(false)
+		assert.False(t, m.layout.treeHidden)
+		assert.Equal(t, paneTree, m.layout.focus)
+	})
+
+	t.Run("hidden tree moves focus to the diff", func(t *testing.T) {
+		m := newModel(true)
+		assert.True(t, m.layout.treeHidden)
+		assert.Equal(t, paneDiff, m.layout.focus, "focus must not sit on a pane that is not rendered")
+	})
+
+	t.Run("diff pane spans the full width after resize", func(t *testing.T) {
+		result, _ := newModel(true).Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+		m := result.(Model)
+		assert.Zero(t, m.layout.treeWidth)
+		assert.Equal(t, 118, m.layout.viewport.Width, "only the diff pane's own borders are subtracted")
+	})
+
+	t.Run("toggle restores the tree", func(t *testing.T) {
+		result, _ := newModel(true).Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+		m := result.(Model)
+		m.toggleTreePane()
+		assert.False(t, m.layout.treeHidden)
+		assert.Positive(t, m.layout.treeWidth, "the tree must get its width back")
+		assert.Less(t, m.layout.viewport.Width, 118, "the diff pane must give width back to the tree")
+	})
 }

@@ -31,8 +31,9 @@ func TestDefault_allExpectedBindings(t *testing.T) {
 		{"left", ActionScrollLeft}, {"right", ActionScrollRight},
 		{"J", ActionScrollDiffDown}, {"K", ActionScrollDiffUp},
 		{"n", ActionNextItem}, {"N", ActionPrevItem}, {"p", ActionPrevItem},
+		{"P", ActionJumpFile},
 		{"]", ActionNextHunk}, {"[", ActionPrevHunk}, {"e", ActionOpenFileInEditor},
-		{"tab", ActionTogglePane}, {"h", ActionFocusTree}, {"l", ActionFocusDiff},
+		{"tab", ActionTogglePane}, {"h", ActionFocusLeft}, {"l", ActionFocusRight},
 		{"/", ActionSearch},
 		{"a", ActionConfirm}, {"enter", ActionConfirm},
 		{"A", ActionAnnotateFile}, {"d", ActionDeleteAnnotation}, {"@", ActionAnnotList}, {"ctrl+e", ActionOpenEditor},
@@ -90,6 +91,47 @@ func TestDefault_ctrlKeysMatchBubbletea(t *testing.T) {
 	km := Default()
 	assert.Equal(t, ActionHalfPageDown, km.Resolve(ctrlD.String()))
 	assert.Equal(t, ActionHalfPageUp, km.Resolve(ctrlU.String()))
+}
+
+func TestActionJumpFile_RegistrationHelpAndDump(t *testing.T) {
+	assert.True(t, IsValidAction(ActionJumpFile))
+
+	km := Default()
+	assert.Equal(t, ActionJumpFile, km.Resolve("P"))
+	sections := km.HelpSections()
+	found := false
+	for _, section := range sections {
+		for _, entry := range section.Entries {
+			if entry.Action == ActionJumpFile {
+				assert.Equal(t, "File/Hunk", section.Name)
+				assert.Equal(t, "jump to file", entry.Description)
+				assert.Equal(t, "P", entry.Keys)
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "jump_file should appear in File/Hunk help")
+
+	var dumped strings.Builder
+	require.NoError(t, km.Dump(&dumped))
+	assert.Contains(t, dumped.String(), "map P jump_file")
+}
+
+// pins the default off ctrl+p: host terminals bind it (agterm session_palette,
+// tmux copy-mode) and swallow it before revdiff sees the key.
+func TestActionJumpFile_NotBoundToCtrlP(t *testing.T) {
+	km := Default()
+	assert.Empty(t, km.Resolve("ctrl+p"), "ctrl+p must stay unbound so host terminals keep it")
+}
+
+func TestActionJumpFile_CustomConfiguration(t *testing.T) {
+	path := t.TempDir() + "/keybindings"
+	require.NoError(t, os.WriteFile(path, []byte("unmap P\nmap alt+f jump_file\n"), 0o600))
+
+	km, err := Load(path)
+	require.NoError(t, err)
+	assert.Empty(t, km.Resolve("P"))
+	assert.Equal(t, ActionJumpFile, km.Resolve("alt+f"))
 }
 
 func TestResolve(t *testing.T) {
@@ -367,6 +409,8 @@ func TestActionScrollConstants_NoDefaultBindings(t *testing.T) {
 func TestIsValidAction(t *testing.T) {
 	assert.True(t, IsValidAction(ActionQuit))
 	assert.True(t, IsValidAction(ActionDown))
+	assert.True(t, IsValidAction(ActionFocusLeft))
+	assert.True(t, IsValidAction(ActionFocusRight))
 	assert.True(t, IsValidAction(ActionInfo))
 	assert.True(t, IsValidAction(Action("commit_info")), "deprecated alias must validate")
 	assert.False(t, IsValidAction(Action("nonexistent")))
